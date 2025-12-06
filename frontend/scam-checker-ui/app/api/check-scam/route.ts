@@ -77,7 +77,7 @@ export async function POST(request: NextRequest) {
           checkedAt: new Date().toISOString(),
         },
       });
-    } catch (backendError: any) {
+    } catch (backendError: unknown) {
       console.error("Backend connection error:", backendError);
       // Fallback to local processing if backend is unavailable
       if (type === "text" && content) {
@@ -99,10 +99,11 @@ export async function POST(request: NextRequest) {
       }
       throw backendError;
     }
-  } catch (error: any) {
+  } catch (error: unknown) {
     console.error("Error processing request:", error);
+    const errorMessage = error instanceof Error ? error.message : "Internal server error";
     return NextResponse.json(
-      { error: "Internal server error", message: error.message },
+      { error: "Internal server error", message: errorMessage },
       { status: 500 }
     );
   }
