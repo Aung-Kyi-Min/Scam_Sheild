@@ -148,7 +148,20 @@ HIGH_RISK_KEYWORDS = [
     "click the link", "verify now", "free gift for you", "you are selected",
     "lucky draw winner", "claim your prize", "activation required", "top up to continue",
     "failure to act", "will result", "result in", "account suspension", "immediate action",
-    "safeguard", "safeguard now", "protect your account", "secure your account"
+    "safeguard", "safeguard now", "protect your account", "secure your account",
+    
+    # Voice-Specific Scam Patterns (very high risk in voice calls)
+    "can you hear me", "say yes", "say yes if you can hear me", "do you hear me",
+    "press one", "press star", "press pound", "press hash", "press the number",
+    "stay on the line", "don't hang up", "keep this call confidential",
+    "this call is being recorded", "for quality assurance", "for security purposes",
+    "verify your identity by saying", "repeat after me", "say your password",
+    "confirm your account number", "read back the code", "tell me the code",
+    "i'm calling from", "this is an automated message", "press any key",
+    "call us back immediately", "call this number now", "dial this number",
+    "hang up and call", "redial this number", "call back within",
+    "your call is important to us", "please hold", "one moment please",
+    "speak to an agent", "transferring your call", "connecting you now"
 ]
 
 # Medium-risk keywords
@@ -201,13 +214,58 @@ def simple_keyword_score(text: str) -> int:
     if size_match:
         file_size = int(size_match.group(1))
     
-    # Even if text contains error messages, analyze it for scam keywords
-    # Error messages from OCR/transcription may still contain useful information
-    t = text.lower()
+    # CRITICAL: Extract the actual transcribed/OCR text before metadata removal
+    # For successful transcriptions, format is: "transcribed_text [Audio: ...]"
+    # For error messages, format is: "Audio file: ... [File metadata: ...]"
+    # We want to analyze ONLY the actual content, not error messages
     
-    # Remove metadata from analysis to avoid false positives
-    # Remove patterns like [Audio: ...] or [File: ...] or [File metadata: ...]
-    t = re.sub(r'\[.*?\]', '', t)
+    # Check if this is an error message (multiple patterns to catch all error cases)
+    text_lower = text.lower().strip()
+    is_error_message = (
+        text.strip().startswith("Audio file:") or 
+        text.strip().startswith("Image file:") or
+        "transcription unavailable" in text_lower or
+        "transcription service unavailable" in text_lower or
+        "could not understand audio" in text_lower or
+        "transcription failed" in text_lower or
+        "speech recognition service error" in text_lower or
+        "network error connecting" in text_lower or
+        "unable to load audio" in text_lower or
+        "please review manually" in text_lower or
+        "please review audio content manually" in text_lower
+    )
+    
+    if is_error_message:
+        # For error messages, return low risk (0) since we can't analyze the actual content
+        # Error messages don't contain the actual voice/image content, so they shouldn't be scored
+        print(f"[DEBUG] Detected error message, returning 0% risk. Text preview: {text[:100]}")
+        return 0
+    
+    # Extract the actual content text (everything before the metadata brackets)
+    # Remove metadata patterns at the end: [Audio: ...] or [File: ...] or [File metadata: ...]
+    # Use a more specific pattern to only remove metadata at the end, not content in brackets
+    content_text = text
+    # Remove trailing metadata: [Audio: ...], [File: ...], [File metadata: ...]
+    content_text = re.sub(r'\s*\[(?:Audio|File|File metadata):[^\]]+\]\s*$', '', content_text, flags=re.IGNORECASE)
+    # Also remove standalone [File metadata: ...] patterns anywhere in the text
+    content_text = re.sub(r'\s*\[File metadata:[^\]]+\]\s*', '', content_text, flags=re.IGNORECASE)
+    # Remove any remaining metadata patterns
+    content_text = re.sub(r'\s*\[Audio:[^\]]+\]\s*', '', content_text, flags=re.IGNORECASE)
+    content_text = re.sub(r'\s*\[File:[^\]]+\]\s*', '', content_text, flags=re.IGNORECASE)
+    
+    # Clean up the content text
+    content_text = content_text.strip()
+    
+    # If after removing metadata we have no meaningful content, return 0
+    if not content_text or len(content_text) < 3:
+        print(f"[DEBUG] No meaningful content after metadata removal. Original: {text[:100]}, Content: {content_text[:100]}")
+        return 0
+    
+    # Log what we're actually analyzing (for debugging)
+    print(f"[DEBUG] Analyzing content text (length: {len(content_text)}): {content_text[:150]}...")
+    
+    # Use the extracted content for analysis
+    t = content_text.lower()
     
     # Fix common OCR errors/typos that might hide scam keywords
     ocr_fixes = {
@@ -234,25 +292,30 @@ def simple_keyword_score(text: str) -> int:
     # we should still score it appropriately
     score = 0
     
-    # Check high-risk keywords (10 points each, max 70)
+    # Check high-risk keywords (15 points each, max 80) - Increased for better detection
     high_risk_hits = sum(1 for k in HIGH_RISK_KEYWORDS if k in t)
-    score += min(70, high_risk_hits * 10)
+    score += min(80, high_risk_hits * 15)  # Increased from 10 to 15 points per hit
     
-    # Check medium-risk keywords (3 points each, max 25)
+    # Check medium-risk keywords (5 points each, max 30) - Increased for better detection
     medium_risk_hits = sum(1 for k in MEDIUM_RISK_KEYWORDS if k in t)
-    score += min(25, medium_risk_hits * 3)
+    score += min(30, medium_risk_hits * 5)  # Increased from 3 to 5 points per hit
+    
+    # Log keyword hits for debugging
+    if high_risk_hits > 0 or medium_risk_hits > 0:
+        print(f"[DEBUG] Keyword hits - High: {high_risk_hits}, Medium: {medium_risk_hits}, Score so far: {score}")
     
     # Check suspicious patterns (more weight)
+    # Use content_text (original case) for pattern matching to preserve case-sensitive patterns
     pattern_score = 0
-    url_count = len(re.findall(r"http[s]?://[^\s]+", text, re.IGNORECASE))
+    url_count = len(re.findall(r"http[s]?://[^\s]+", content_text, re.IGNORECASE))
     if url_count > 0:
         pattern_score += 20 * url_count  # URLs are very suspicious
     
     # CRITICAL: Shortened URLs are extremely suspicious (major red flag)
     has_shortened_url = any(domain in t for domain in SHORTENED_URL_DOMAINS)
-    # Also check for shortened URL patterns in text (bit.ly, tinyurl, etc.)
+    # Also check for shortened URL patterns in content_text (bit.ly, tinyurl, etc.)
     shortened_url_pattern = r"(?:bit\.ly|tinyurl|goo\.gl|t\.co|ow\.ly|buff\.ly|short\.link|is\.gd|v\.gd|cutt\.ly|rebrand\.ly|tiny\.cc)[/\w]+"
-    if re.search(shortened_url_pattern, t, re.IGNORECASE):
+    if re.search(shortened_url_pattern, content_text, re.IGNORECASE):
         has_shortened_url = True
     
     if has_shortened_url:
@@ -264,11 +327,11 @@ def simple_keyword_score(text: str) -> int:
         r"\b\d{3}[-.]?\d{3}\b",  # Short format like 123-456
         r"\b\d{10,}\b"  # Long number sequences
     ]
-    phone_count = sum(len(re.findall(pattern, text, re.IGNORECASE)) for pattern in phone_patterns)
+    phone_count = sum(len(re.findall(pattern, content_text, re.IGNORECASE)) for pattern in phone_patterns)
     if phone_count > 0:
         pattern_score += 15 * phone_count
     
-    email_count = len(re.findall(r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b", text, re.IGNORECASE))
+    email_count = len(re.findall(r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b", content_text, re.IGNORECASE))
     if email_count > 0:
         pattern_score += 8 * email_count
     
@@ -280,7 +343,7 @@ def simple_keyword_score(text: str) -> int:
         r"£[\d,]+(?:\.\d{2})?",  # British Pound: £100
         r"\b\d{1,3}(?:,\d{3})*(?:\.\d{2})?\s*(?:dollars?|ringgit|euros?|pounds?)\b",  # "100 dollars", "5300 ringgit"
     ]
-    money_count = sum(len(re.findall(pattern, text, re.IGNORECASE)) for pattern in money_patterns)
+    money_count = sum(len(re.findall(pattern, content_text, re.IGNORECASE)) for pattern in money_patterns)
     if money_count > 0:
         pattern_score += 15 * money_count  # Increased from 12 to 15
     
@@ -293,7 +356,7 @@ def simple_keyword_score(text: str) -> int:
     has_congrats = any(word in t for word in ["congrats", "congratulations", "congratulation"])
     has_job = any(word in t for word in ["job", "position", "employment", "hiring", "work", "opportunity", "shopee task", "telegram job", "part time", "work from home"])
     has_payment = any(word in t for word in ["pay", "payment", "fee", "cost", "charge", "send money", "transfer", "zelle", "venmo", "cashapp", "top up"])
-    has_money = bool(re.search(r"(?:\$|RM|€|£)[\d,]+|\b\d{1,3}(?:,\d{3})*(?:\.\d{2})?\s*(?:dollars?|ringgit|euros?|pounds?)\b", text, re.IGNORECASE))
+    has_money = bool(re.search(r"(?:\$|RM|€|£)[\d,]+|\b\d{1,3}(?:,\d{3})*(?:\.\d{2})?\s*(?:dollars?|ringgit|euros?|pounds?)\b", content_text, re.IGNORECASE))
     
     if has_congrats and (has_job or has_payment):
         score += 40  # Massive bonus for job scam pattern
@@ -358,17 +421,17 @@ def simple_keyword_score(text: str) -> int:
     if has_fee and (has_payment_method or has_money):
         score += 35
     
-    # Bonus for multiple high-risk indicators (exponential)
+    # Bonus for multiple high-risk indicators (exponential) - Increased bonuses
     if high_risk_hits >= 5:
-        score += 30
+        score += 40  # Increased from 30
     elif high_risk_hits >= 4:
-        score += 25
+        score += 35  # Increased from 25
     elif high_risk_hits >= 3:
-        score += 20
+        score += 30  # Increased from 20
     elif high_risk_hits >= 2:
-        score += 15
+        score += 20  # Increased from 15
     elif high_risk_hits >= 1:
-        score += 8
+        score += 12  # Increased from 8
     
     # Bonus for combination of urgent + financial keywords
     has_urgent = any(word in t for word in ["urgent", "immediately", "now", "asap", "hurry", "right now", "today"])
@@ -379,7 +442,7 @@ def simple_keyword_score(text: str) -> int:
     # CRITICAL: Transfer + amount + urgency + account threat = extremely high risk
     has_transfer = any(phrase in t for phrase in ["transfer", "please transfer", "must transfer", "need to transfer", "send money", "wire money"])
     has_account_threat = any(phrase in t for phrase in ["account closure", "account close", "close your account", "account suspended", "account locked", "avoid account", "prevent closure"])
-    has_money_amount = bool(re.search(r"(?:\$|RM|€|£)[\d,]+|\b\d{1,3}(?:,\d{3})*(?:\.\d{2})?\s*(?:dollars?|ringgit|euros?|pounds?)\b", text, re.IGNORECASE))
+    has_money_amount = bool(re.search(r"(?:\$|RM|€|£)[\d,]+|\b\d{1,3}(?:,\d{3})*(?:\.\d{2})?\s*(?:dollars?|ringgit|euros?|pounds?)\b", content_text, re.IGNORECASE))
     has_urgency_word = any(word in t for word in ["today", "immediately", "now", "asap", "urgent", "right now", "hurry"])
     
     if has_transfer and has_account_threat:
@@ -401,7 +464,36 @@ def simple_keyword_score(text: str) -> int:
     if "confirm" in t and (has_payment or has_job):
         score += 20
     
+    # CRITICAL: Voice-specific scam detection (very high risk indicators)
+    # These patterns are extremely suspicious in voice calls
+    voice_suspicious_patterns = [
+        "can you hear me", "say yes", "press one", "press star", "press pound",
+        "stay on the line", "don't hang up", "this call is being recorded",
+        "verify your identity by saying", "repeat after me", "say your password",
+        "read back the code", "tell me the code", "call us back immediately"
+    ]
+    has_voice_scam_pattern = any(pattern in t for pattern in voice_suspicious_patterns)
+    if has_voice_scam_pattern:
+        score += 50  # Voice scam patterns are extremely high risk
+    
+    # Voice call-back requests + urgency = very suspicious
+    has_call_back = any(phrase in t for phrase in [
+        "call us back", "call back", "call this number", "dial this number",
+        "redial", "hang up and call", "call immediately", "call now"
+    ])
+    if has_call_back and has_urgent:
+        score += 40  # Urgent call-back request is a major red flag
+    
+    # "Press" or "Say" commands in voice = high risk (common in phone scams)
+    has_voice_command = any(phrase in t for phrase in [
+        "press one", "press star", "press pound", "press hash", "press the number",
+        "say yes", "say your", "repeat after me", "tell me"
+    ])
+    if has_voice_command:
+        score += 35  # Voice commands are suspicious
+    
     # CRITICAL: Authority impersonation scams (police, FBI, IRS, etc. + financial request = very high risk)
+    # Define has_authority BEFORE using it
     has_authority = any(phrase in t for phrase in [
         "this is the police", "this is police", "fbi", "irs", "government",
         "law enforcement", "federal agent", "sheriff", "marshal", "court order",
@@ -409,6 +501,10 @@ def simple_keyword_score(text: str) -> int:
         "your identity used", "tax evasion", "customs department", "legal case",
         "officer in charge", "macc investigation"
     ])
+    
+    # Authority + voice verification = extremely high risk
+    if has_authority and has_voice_command:
+        score += 60  # Authority impersonation + voice verification = maximum risk
     has_freeze = any(phrase in t for phrase in ["freeze", "freeze your account", "freeze account", "suspend", "close your account", "seize", "bank account frozen"])
     has_card_request = any(phrase in t for phrase in ["card number", "credit card", "give us your", "provide your", "send us your", "we need your", "pay fine", "verify identity"])
     has_financial_info = any(word in t for word in ["account", "bank", "ssn", "social security"])
@@ -459,7 +555,9 @@ def simple_keyword_score(text: str) -> int:
     score += variation
     
     # Cap at 100, floor at 0
-    return min(100, max(0, score))
+    final_score = min(100, max(0, score))
+    print(f"[DEBUG] Final risk score: {final_score}% (raw score: {score})")
+    return final_score
 
 # ----- Claude Integration Helper (example) -----
 def call_claude_classify(text: str):
@@ -745,81 +843,123 @@ def transcribe_audio(audio_path: str) -> str:
             audio = audio[:60000]
             print(f"[AUDIO] Audio too long, processing first 60 seconds")
         
-        # Normalize audio - improve quality
-        # Normalize volume
+        # Enhanced audio preprocessing for better transcription
+        # Step 1: Normalize volume
         try:
             normalized_audio = audio.normalize()
         except:
             normalized_audio = audio
         
-        # Convert to mono if stereo (better for speech recognition)
+        # Step 2: Convert to mono if stereo (better for speech recognition)
         if channels > 1:
             normalized_audio = normalized_audio.set_channels(1)
         
-        # Set consistent sample rate (16kHz is good for speech)
+        # Step 3: Set consistent sample rate (16kHz is optimal for speech)
         if sample_rate != 16000:
             normalized_audio = normalized_audio.set_frame_rate(16000)
+        
+        # Step 4: Apply high-pass filter to remove low-frequency noise (below 80Hz)
+        # This helps remove background hum and improves speech clarity
+        try:
+            # Use pydub's built-in high-pass filter if available
+            # For frequencies below 80Hz, reduce volume significantly
+            normalized_audio = normalized_audio.high_pass_filter(80)
+        except:
+            # If high-pass filter not available, continue without it
+            pass
+        
+        # Step 5: Apply low-pass filter to remove high-frequency noise (above 8000Hz)
+        # This helps reduce hiss and improves recognition accuracy
+        try:
+            normalized_audio = normalized_audio.low_pass_filter(8000)
+        except:
+            pass
+        
+        # Step 6: Additional volume boost if audio is too quiet
+        if volume_ratio < 30:
+            try:
+                # Boost quiet audio by up to 15dB, but don't exceed safe limits
+                boost_db = min(15, 30 - volume_ratio)
+                normalized_audio = normalized_audio + boost_db
+                print(f"[AUDIO] Applied {boost_db}dB volume boost (original: {volume_ratio:.1f}%)")
+            except:
+                pass
         
         # Export to WAV with optimal settings
         wav_path = audio_path.rsplit('.', 1)[0] + '_processed.wav'
         normalized_audio.export(wav_path, format="wav", parameters=["-ac", "1", "-ar", "16000"])
         print(f"[AUDIO] Exported processed audio to: {wav_path}")
         
-        # Try multiple transcription strategies
+        # Enhanced transcription with multiple strategies
         r = sr.Recognizer()
         r.energy_threshold = 300  # Adjust sensitivity
         r.dynamic_energy_threshold = True
+        r.pause_threshold = 0.8  # Reduce pause threshold for faster speech
+        r.phrase_threshold = 0.3  # Lower phrase threshold for better detection
         
         transcription_results = []
+        languages_to_try = ["en-US", "en-GB", "en-AU"]  # Try multiple English variants
         
-        # Strategy 1: Full audio with noise adjustment
-        try:
-            with sr.AudioFile(wav_path) as source:
-                # Adjust for ambient noise with longer duration for better accuracy
-                r.adjust_for_ambient_noise(source, duration=1.0)
-                audio_data = r.record(source)
-                
-                # Try Google Speech Recognition
-                try:
-                    text = r.recognize_google(audio_data, language="en-US", show_all=False)
-                    if text and len(text.strip()) > 3:
-                        print(f"[AUDIO] Google recognition successful: {text[:100]}...")
-                        # Include file metadata in successful transcription for traceability
-                        return f"{text.strip()} [Audio: {filename}, {duration_seconds:.1f}s, {file_size} bytes]"
-                except sr.UnknownValueError:
-                    print("[AUDIO] Google: Could not understand audio")
-                except sr.RequestError as e:
-                    print(f"[AUDIO] Google API error: {e}")
-        except Exception as e:
-            print(f"[AUDIO] Strategy 1 failed: {e}")
+        # Strategy 1: Full audio with optimized noise adjustment
+        for lang in languages_to_try:
+            try:
+                with sr.AudioFile(wav_path) as source:
+                    # Adjust for ambient noise with adaptive duration
+                    noise_duration = min(1.5, duration_seconds * 0.1)  # Adaptive based on length
+                    r.adjust_for_ambient_noise(source, duration=noise_duration)
+                    audio_data = r.record(source)
+                    
+                    # Try Google Speech Recognition
+                    try:
+                        text = r.recognize_google(audio_data, language=lang, show_all=False)
+                        if text and len(text.strip()) > 3:
+                            print(f"[AUDIO] Google recognition successful ({lang}): {text[:100]}...")
+                            transcription_results.append(text.strip())
+                            # Return immediately if we get a good result
+                            if len(text.strip()) > 10:
+                                return f"{text.strip()} [Audio: {filename}, {duration_seconds:.1f}s, {file_size} bytes]"
+                    except sr.UnknownValueError:
+                        print(f"[AUDIO] Google ({lang}): Could not understand audio")
+                    except sr.RequestError as e:
+                        print(f"[AUDIO] Google API error ({lang}): {e}")
+            except Exception as e:
+                print(f"[AUDIO] Strategy 1 ({lang}) failed: {e}")
         
-        # Strategy 2: Try with different language settings
-        try:
-            with sr.AudioFile(wav_path) as source:
-                r.adjust_for_ambient_noise(source, duration=0.5)
-                audio_data = r.record(source)
-                
-                # Try with show_all to get alternatives
-                try:
-                    result = r.recognize_google(audio_data, language="en-US", show_all=True)
-                    if result and 'alternative' in result:
-                        # Get the best match
-                        best_match = result['alternative'][0]['transcript']
-                        if best_match and len(best_match.strip()) > 3:
-                            print(f"[AUDIO] Google (alternative) successful: {best_match[:100]}...")
-                            return f"{best_match.strip()} [Audio: {filename}, {duration_seconds:.1f}s, {file_size} bytes]"
-                except:
-                    pass
-        except Exception as e:
-            print(f"[AUDIO] Strategy 2 failed: {e}")
+        # Strategy 2: Try with show_all to get alternatives and confidence scores
+        for lang in languages_to_try:
+            try:
+                with sr.AudioFile(wav_path) as source:
+                    r.adjust_for_ambient_noise(source, duration=0.5)
+                    audio_data = r.record(source)
+                    
+                    try:
+                        result = r.recognize_google(audio_data, language=lang, show_all=True)
+                        if result and 'alternative' in result:
+                            # Get the best match with highest confidence
+                            best_match = result['alternative'][0]['transcript']
+                            confidence = result['alternative'][0].get('confidence', 0)
+                            if best_match and len(best_match.strip()) > 3:
+                                print(f"[AUDIO] Google (alternative, {lang}, conf: {confidence:.2f}): {best_match[:100]}...")
+                                transcription_results.append(best_match.strip())
+                                if confidence > 0.7 and len(best_match.strip()) > 10:
+                                    return f"{best_match.strip()} [Audio: {filename}, {duration_seconds:.1f}s, {file_size} bytes]"
+                    except:
+                        pass
+            except Exception as e:
+                print(f"[AUDIO] Strategy 2 ({lang}) failed: {e}")
         
-        # Strategy 3: Chunk the audio and try to transcribe chunks
+        # Strategy 3: Overlapping chunk strategy for better accuracy
+        # Use 20-second chunks with 5-second overlap to avoid cutting words
         try:
-            chunk_duration = 30000  # 30 seconds per chunk
+            chunk_duration = 20000  # 20 seconds per chunk
+            overlap_duration = 5000  # 5 seconds overlap
             chunk_texts = []
             
-            for i in range(0, len(normalized_audio), chunk_duration):
-                chunk = normalized_audio[i:i+chunk_duration]
+            i = 0
+            while i < len(normalized_audio):
+                # Create overlapping chunk
+                chunk_end = min(i + chunk_duration, len(normalized_audio))
+                chunk = normalized_audio[i:chunk_end]
                 chunk_path = wav_path.replace('.wav', f'_chunk_{i//chunk_duration}.wav')
                 chunk.export(chunk_path, format="wav")
                 
@@ -827,44 +967,93 @@ def transcribe_audio(audio_path: str) -> str:
                     with sr.AudioFile(chunk_path) as source:
                         r.adjust_for_ambient_noise(source, duration=0.3)
                         chunk_audio = r.record(source)
-                        chunk_text = r.recognize_google(chunk_audio, language="en-US")
-                        if chunk_text and len(chunk_text.strip()) > 3:
-                            chunk_texts.append(chunk_text.strip())
-                            print(f"[AUDIO] Chunk {i//chunk_duration} transcribed: {chunk_text[:50]}...")
+                        # Try multiple languages for each chunk
+                        for lang in languages_to_try:
+                            try:
+                                chunk_text = r.recognize_google(chunk_audio, language=lang)
+                                if chunk_text and len(chunk_text.strip()) > 3:
+                                    chunk_texts.append(chunk_text.strip())
+                                    print(f"[AUDIO] Chunk {i//chunk_duration} transcribed ({lang}): {chunk_text[:50]}...")
+                                    break  # Success, move to next chunk
+                            except:
+                                continue
                 except:
                     pass
                 finally:
                     # Clean up chunk file
                     if os.path.exists(chunk_path):
                         os.unlink(chunk_path)
+                
+                # Move forward with overlap
+                i += (chunk_duration - overlap_duration)
             
             if chunk_texts:
+                # Remove duplicate phrases from overlapping chunks
                 combined_text = " ".join(chunk_texts)
-                print(f"[AUDIO] Chunked transcription successful: {combined_text[:100]}...")
-                return f"{combined_text.strip()} [Audio: {filename}, {duration_seconds:.1f}s, {len(chunk_texts)} chunks, {file_size} bytes]"
+                # Simple deduplication: remove repeated phrases
+                words = combined_text.split()
+                deduplicated = []
+                seen_phrases = set()
+                for i in range(len(words) - 4):
+                    phrase = " ".join(words[i:i+5])
+                    if phrase not in seen_phrases:
+                        deduplicated.append(words[i])
+                        seen_phrases.add(phrase)
+                    else:
+                        # Skip this word as it's part of a duplicate phrase
+                        continue
+                # Add remaining words
+                deduplicated.extend(words[len(deduplicated):])
+                combined_text = " ".join(deduplicated)
+                
+                print(f"[AUDIO] Overlapping chunked transcription successful: {combined_text[:100]}...")
+                transcription_results.append(combined_text.strip())
+                if len(combined_text.strip()) > 10:
+                    return f"{combined_text.strip()} [Audio: {filename}, {duration_seconds:.1f}s, {len(chunk_texts)} chunks, {file_size} bytes]"
         except Exception as e:
-            print(f"[AUDIO] Strategy 3 (chunking) failed: {e}")
+            print(f"[AUDIO] Strategy 3 (overlapping chunks) failed: {e}")
         
-        # Strategy 4: Try with increased volume
+        # Strategy 4: Try with increased volume and different thresholds
         try:
-            louder_audio = normalized_audio + 10  # Increase volume by 10dB
+            louder_audio = normalized_audio + 12  # Increase volume by 12dB
             louder_path = wav_path.replace('.wav', '_louder.wav')
             louder_audio.export(louder_path, format="wav")
             
+            r2 = sr.Recognizer()
+            r2.energy_threshold = 200  # Lower threshold for louder audio
+            r2.dynamic_energy_threshold = True
+            
             with sr.AudioFile(louder_path) as source:
-                r.adjust_for_ambient_noise(source, duration=0.5)
-                audio_data = r.record(source)
-                text = r.recognize_google(audio_data, language="en-US")
-                if text and len(text.strip()) > 3:
-                    print(f"[AUDIO] Louder audio transcription successful: {text[:100]}...")
-                    if os.path.exists(louder_path):
-                        os.unlink(louder_path)
-                    return f"{text.strip()} [Audio: {filename}, {duration_seconds:.1f}s, amplified, {file_size} bytes]"
+                r2.adjust_for_ambient_noise(source, duration=0.5)
+                audio_data = r2.record(source)
+                for lang in languages_to_try:
+                    try:
+                        text = r2.recognize_google(audio_data, language=lang)
+                        if text and len(text.strip()) > 3:
+                            print(f"[AUDIO] Louder audio transcription successful ({lang}): {text[:100]}...")
+                            transcription_results.append(text.strip())
+                            if os.path.exists(louder_path):
+                                os.unlink(louder_path)
+                            if len(text.strip()) > 10:
+                                return f"{text.strip()} [Audio: {filename}, {duration_seconds:.1f}s, amplified, {file_size} bytes]"
+                    except:
+                        continue
             
             if os.path.exists(louder_path):
                 os.unlink(louder_path)
         except Exception as e:
             print(f"[AUDIO] Strategy 4 (louder) failed: {e}")
+        
+        # Strategy 5: Combine all transcription results if we have multiple
+        if len(transcription_results) > 1:
+            # Use the longest result as it's likely most complete
+            best_result = max(transcription_results, key=len)
+            print(f"[AUDIO] Using best result from {len(transcription_results)} attempts: {best_result[:100]}...")
+            return f"{best_result.strip()} [Audio: {filename}, {duration_seconds:.1f}s, {file_size} bytes, combined]"
+        elif len(transcription_results) == 1:
+            # Use the single result we got
+            print(f"[AUDIO] Using single transcription result: {transcription_results[0][:100]}...")
+            return f"{transcription_results[0].strip()} [Audio: {filename}, {duration_seconds:.1f}s, {file_size} bytes]"
         
         # If all strategies fail, return detailed error with unique metadata
         file_ext = os.path.splitext(filename)[1].lower()
@@ -933,6 +1122,9 @@ def analyze_text(text: str):
     if len(text) == 0:
         raise HTTPException(status_code=400, detail="text empty")
 
+    # Log the input text for debugging
+    print(f"[DEBUG] analyze_text called with text (length: {len(text)}): {text[:200]}...")
+
     # 1) Try to call Claude, fall back to improved keyword detection
     try:
         claude_out = call_claude_classify(text)
@@ -941,10 +1133,13 @@ def analyze_text(text: str):
         label = claude_out.get("label", "suspicious")
         explanation = claude_out.get("explanation", "")
         recommended_action = claude_out.get("recommended_action", "")
+        print(f"[DEBUG] Claude analysis result: risk={risk}%, label={label}")
     except Exception as e:
         # fallback - use improved keyword detection
         error_str = str(e)
+        print(f"[DEBUG] Claude failed, using keyword detection. Error: {error_str}")
         risk = simple_keyword_score(text)
+        print(f"[DEBUG] Keyword detection result: risk={risk}%")
         
         # Determine label based on risk score
         if risk >= 70:
@@ -1080,6 +1275,51 @@ async def predict(
     result["input_type"] = input_type
     if input_type in ["image", "voice"]:
         result["extracted_text"] = extracted_text[:200]  # Include first 200 chars
+    
+    # CRITICAL: For voice files, apply additional sensitivity boost
+    # Voice scams are often more urgent and manipulative, so we need higher sensitivity
+    if input_type == "voice" and result["risk_score"] > 0:
+        # Check if it's actual transcribed content (not an error message)
+        is_actual_content = not (
+            extracted_text.strip().startswith("Audio file:") or
+            "transcription unavailable" in extracted_text.lower() or
+            "please review manually" in extracted_text.lower()
+        )
+        
+        if is_actual_content:
+            # Apply voice-specific boost: increase risk score by 20% (capped at 100)
+            original_score = result["risk_score"]
+            boosted_score = min(100, int(original_score * 1.2))
+            
+            # If the text contains any scam keywords at all, ensure minimum 30% risk
+            # This prevents legitimate-sounding but suspicious voice calls from scoring too low
+            if original_score > 0 and original_score < 30:
+                # If there are any high-risk keywords, boost to at least 30%
+                content_lower = extracted_text.lower()
+                has_any_scam_keyword = any(
+                    keyword in content_lower for keyword in HIGH_RISK_KEYWORDS[:20]  # Check first 20 keywords
+                )
+                if has_any_scam_keyword:
+                    boosted_score = max(boosted_score, 30)
+            
+            result["risk_score"] = boosted_score
+            print(f"[DEBUG] Voice file boost applied: {original_score}% -> {boosted_score}%")
+            
+            # Update label if score crossed threshold
+            if boosted_score >= 70:
+                result["label"] = "scam"
+            elif boosted_score >= 40:
+                result["label"] = "suspicious"
+            else:
+                result["label"] = "benign"
+            
+            # Update explanation with boosted score
+            if boosted_score >= 70:
+                result["explanation"] = f"⚠️ HIGH RISK ({boosted_score}%): Multiple scam indicators detected in voice call including urgent language, suspicious requests, or financial demands. This appears to be a scam."
+            elif boosted_score >= 40:
+                result["explanation"] = f"⚠️ MODERATE RISK ({boosted_score}%): Suspicious elements detected in voice call. Exercise extreme caution."
+            elif boosted_score >= 20:
+                result["explanation"] = f"⚠️ LOW RISK ({boosted_score}%): Some minor suspicious elements detected in voice call. Proceed with caution."
     
     return result
 

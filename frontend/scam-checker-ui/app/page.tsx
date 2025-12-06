@@ -74,6 +74,7 @@ export default function Home() {
     score: 0,
     reason: "Awaiting evidence. Paste a summary for voice, text, or image.",
     channel: "voice",
+    // Leave empty on first render so SSR and client markup match; fill in on interactions
     timestamp: "",
   });
   const [history, setHistory] = useState<ScanResult[]>([]);
@@ -186,11 +187,30 @@ export default function Home() {
       });
 
       if (!response.ok) {
-        const errorData = await response.json().catch(() => ({ error: "Unknown error" }));
-        throw new Error(errorData.error || `Server error: ${response.status}`);
+        let errorMessage = `Server error: ${response.status}`;
+        try {
+          const errorData = await response.json();
+          errorMessage = errorData.error || errorData.message || errorMessage;
+        } catch {
+          // If response is not JSON, try to get text
+          try {
+            const errorText = await response.text();
+            errorMessage = errorText || errorMessage;
+          } catch {
+            // Use default error message
+            errorMessage = `Server error: ${response.status} ${response.statusText}`;
+          }
+        }
+        throw new Error(errorMessage);
       }
 
-      const data = await response.json();
+      let data;
+      try {
+        data = await response.json();
+      } catch (parseError) {
+        console.error("Failed to parse response as JSON:", parseError);
+        throw new Error("Invalid response format from server. Please try again.");
+      }
 
       // Map API response to UI format (Next.js API route format)
       const details = data.details || data;
