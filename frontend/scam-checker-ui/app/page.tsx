@@ -37,13 +37,6 @@ const channelCopy: Record<
   },
 };
 
-const reasons = [
-  "Detected urgency language and payment request without validation.",
-  "Links redirect to non-official domains; sender spoofed.",
-  "Audio pacing and metadata do not match expected caller profile.",
-  "Visual signature mismatches known templates; potential tampering.",
-  "Content is consistent with verified sender history.",
-];
 
 const riskPalette: Record<RiskLevel, string> = {
   pending: "bg-white/5 text-slate-50 border-white/10",
@@ -59,11 +52,16 @@ const riskAccent: Record<RiskLevel, string> = {
   danger: "text-rose-100",
 };
 
+const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:3001";
+
 export default function Home() {
   const [channel, setChannel] = useState<Channel>("voice");
   const [input, setInput] = useState("");
+  const [voiceFile, setVoiceFile] = useState<File | null>(null);
+  const [imageFile, setImageFile] = useState<File | null>(null);
   const [voiceFileName, setVoiceFileName] = useState("");
   const [imageFileName, setImageFileName] = useState("");
+  const [loading, setLoading] = useState(false);
   const [status, setStatus] = useState<ScanResult>({
     level: "pending",
     score: 0,
@@ -92,12 +90,22 @@ export default function Home() {
 
   useEffect(() => {
     setInput("");
+    setVoiceFile(null);
+    setImageFile(null);
     setVoiceFileName("");
     setImageFileName("");
   }, [channel]);
 
-  const runScan = () => {
-    if (!input.trim()) {
+  // Map API label to UI risk level
+  const mapLabelToLevel = (label: string, riskScore: number): RiskLevel => {
+    if (label === "scam" || riskScore >= 70) return "danger";
+    if (label === "suspicious" || riskScore >= 40) return "warn";
+    return "safe";
+  };
+
+  const runScan = async () => {
+    // Validate input
+    if (channel === "text" && !input.trim()) {
       setStatus((prev) => ({
         ...prev,
         level: "pending",
@@ -109,47 +117,87 @@ export default function Home() {
       return;
     }
 
-    const sampledLevel: RiskLevel =
-      Math.random() > 0.65
-        ? "danger"
-        : Math.random() > 0.4
-          ? "warn"
-          : "safe";
-    const sampledScore =
-      sampledLevel === "danger"
-        ? 92 + Math.round(Math.random() * 6)
-        : sampledLevel === "warn"
-          ? 68 + Math.round(Math.random() * 8)
-          : 40 + Math.round(Math.random() * 12);
+    if ((channel === "voice" || channel === "image") && !voiceFile && !imageFile && !input.trim()) {
+      setStatus((prev) => ({
+        ...prev,
+        level: "pending",
+        score: 0,
+        reason: "Please upload a file or provide text input.",
+        channel,
+        timestamp: new Date().toLocaleTimeString(),
+      }));
+      return;
+    }
 
-    const result: ScanResult = {
-      level: sampledLevel,
-      score: sampledScore,
-      reason: reasons[Math.floor(Math.random() * reasons.length)],
+    setLoading(true);
+    setStatus((prev) => ({
+      ...prev,
+      level: "pending",
+      score: 0,
+      reason: "Analyzing...",
       channel,
       timestamp: new Date().toLocaleTimeString(),
-    };
+    }));
 
-    setStatus(result);
-    setHistory((prev) => [result, ...prev].slice(0, 5));
+    try {
+      const formData = new FormData();
+      formData.append("type", channel);
+
+      // Handle file uploads
+      if (channel === "voice" && voiceFile) {
+        formData.append("file", voiceFile);
+      } else if (channel === "image" && imageFile) {
+        formData.append("file", imageFile);
+      }
+
+      // Add text input if provided
+      if (input.trim()) {
+        formData.append("text", input.trim());
+      }
+
+      const response = await fetch(`${API_URL}/api/check`, {
+        method: "POST",
+        body: formData,
+      });
+
+      if (!response.ok) {
+        const errorData = await response.json().catch(() => ({ error: "Unknown error" }));
+        throw new Error(errorData.error || `Server error: ${response.status}`);
+      }
+
+      const data = await response.json();
+
+      // Map API response to UI format
+      const riskLevel = mapLabelToLevel(data.label || "benign", data.risk_score || 0);
+      const result: ScanResult = {
+        level: riskLevel,
+        score: data.risk_score || 0,
+        reason: data.explanation || data.recommended_action || "Analysis complete.",
+        channel,
+        timestamp: new Date().toLocaleTimeString(),
+      };
+
+      setStatus(result);
+      setHistory((prev) => [result, ...prev].slice(0, 5));
+
+      // If audio URL is returned, you could play it here
+      if (data.audio_url) {
+        console.log("Audio available at:", `${API_URL}${data.audio_url}`);
+      }
+    } catch (error) {
+      console.error("Scan error:", error);
+      setStatus({
+        level: "pending",
+        score: 0,
+        reason: error instanceof Error ? error.message : "Failed to analyze. Please try again.",
+        channel,
+        timestamp: new Date().toLocaleTimeString(),
+      });
+    } finally {
+      setLoading(false);
+    }
   };
 
-  const quickMark = (level: Exclude<RiskLevel, "pending">) => {
-    const result: ScanResult = {
-      level,
-      score: level === "safe" ? 35 : level === "warn" ? 70 : 95,
-      reason:
-        level === "safe"
-          ? "Manually marked as trusted after human verification."
-          : level === "warn"
-            ? "Pending more context; flagged for secondary review."
-            : "Manual override: behavior matches known scam patterns.",
-      channel,
-      timestamp: new Date().toLocaleTimeString(),
-    };
-    setStatus(result);
-    setHistory((prev) => [result, ...prev].slice(0, 5));
-  };
 
   return (
     <div className="min-h-screen bg-[#0c1018] text-slate-100">
@@ -206,8 +254,8 @@ export default function Home() {
                     onChange={(e) => {
                       const file = e.target.files?.[0];
                       if (file) {
+                        setVoiceFile(file);
                         setVoiceFileName(file.name);
-                        setInput(file.name);
                       }
                     }}
                   />
@@ -229,8 +277,8 @@ export default function Home() {
                     onChange={(e) => {
                       const file = e.target.files?.[0];
                       if (file) {
+                        setImageFile(file);
                         setImageFileName(file.name);
-                        setInput(file.name);
                       }
                     }}
                   />
@@ -270,9 +318,10 @@ export default function Home() {
               <div className="mt-4 flex flex-wrap items-center gap-2">
                 <button
                   onClick={runScan}
-                  className="rounded-lg bg-emerald-500 px-4 py-2 text-sm font-semibold text-white shadow-lg shadow-emerald-500/30 transition hover:brightness-110"
+                  disabled={loading}
+                  className="rounded-lg bg-emerald-500 px-4 py-2 text-sm font-semibold text-white shadow-lg shadow-emerald-500/30 transition hover:brightness-110 disabled:opacity-50 disabled:cursor-not-allowed"
                 >
-                  Run scan
+                  {loading ? "Analyzing..." : "Run scan"}
                 </button>
               </div>
             </div>

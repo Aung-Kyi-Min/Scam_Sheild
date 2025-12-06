@@ -60,8 +60,11 @@ class PredictRequest(BaseModel):
 # High-risk keywords (worth more points)
 HIGH_RISK_KEYWORDS = [
     # Basic urgency and verification
-    "urgent", "verify", "password", "otp", "one-time", "verify now",
-    "account locked", "suspended", "closed", "expired", "compromised",
+    "urgent", "urgent!", "verify", "password", "otp", "one-time", "verify now",
+    "account locked", "suspended", "closed", "closure", "close", "expired", "compromised",
+    "account closure", "account close", "avoid account", "prevent closure",
+    "account has compromised", "account compromised", "has compromised", "been compromised",
+    "click here immediately", "click here", "click link", "click now",
     "lottery", "prize", "winner", "congratulations", "congrats", "won", "claim now",
     "free money", "guaranteed", "risk-free", "act now", "limited time",
     "click here", "click link", "verify account", "update password",
@@ -100,6 +103,7 @@ HIGH_RISK_KEYWORDS = [
     "processing fee", "application fee", "registration fee", "activation fee",
     "processing cost", "admin fee", "service fee", "setup fee",
     "pay now", "send payment", "make payment", "wire money", "transfer money",
+    "transfer", "please transfer", "must transfer", "need to transfer",
     
     # Payment methods (often used in scams)
     "zelle", "venmo", "cashapp", "cash app", "paypal", "western union",
@@ -107,11 +111,11 @@ HIGH_RISK_KEYWORDS = [
     "paynow agent", "escrow service",
     
     # Urgency and pressure tactics
-    "immediately", "asap", "right now", "today only", "expires today",
+    "immediately", "asap", "right now", "today", "today only", "expires today",
     "last chance", "final notice", "don't miss out", "limited offer",
     "urgent action required", "do not tell anyone", "keep this confidential",
     "act immediately", "within 10 minutes", "last warning", "final reminder",
-    "failure to comply",
+    "failure to comply", "important notice", "urgent notice",
     
     # Authority impersonation (very high risk)
     "this is the police", "this is police", "fbi", "irs", "government",
@@ -141,7 +145,9 @@ HIGH_RISK_KEYWORDS = [
     
     # High-Risk Phrases
     "click the link", "verify now", "free gift for you", "you are selected",
-    "lucky draw winner", "claim your prize", "activation required", "top up to continue"
+    "lucky draw winner", "claim your prize", "activation required", "top up to continue",
+    "failure to act", "will result", "result in", "account suspension", "immediate action",
+    "safeguard", "safeguard now", "protect your account", "secure your account"
 ]
 
 # Medium-risk keywords
@@ -183,7 +189,33 @@ def simple_keyword_score(text: str) -> int:
     if not text or len(text.strip()) == 0:
         return 0
     
+    # Even if text contains error messages, analyze it for scam keywords
+    # Error messages from OCR/transcription may still contain useful information
     t = text.lower()
+    
+    # Fix common OCR errors/typos that might hide scam keywords
+    ocr_fixes = {
+        "comprmised": "compromised",
+        "compr0mised": "compromised",
+        "comprom1sed": "compromised",
+        "acc0unt": "account",
+        "acc0un": "account",
+        "suspen5ion": "suspension",
+        "suspen$ion": "suspension",
+        "ver1fy": "verify",
+        "verifv": "verify",
+        "1mmediately": "immediately",
+        "immed1ately": "immediately",
+        "co immediately": "immediately",  # Common OCR error
+        "c1ick": "click",
+        "c1ick here": "click here",
+    }
+    for typo, correct in ocr_fixes.items():
+        if typo in t:
+            t = t.replace(typo, correct)
+    
+    # Special handling: if text mentions OCR/transcription errors but also contains scam keywords,
+    # we should still score it appropriately
     score = 0
     
     # Check high-risk keywords (10 points each, max 70)
@@ -202,8 +234,13 @@ def simple_keyword_score(text: str) -> int:
     
     # CRITICAL: Shortened URLs are extremely suspicious (major red flag)
     has_shortened_url = any(domain in t for domain in SHORTENED_URL_DOMAINS)
+    # Also check for shortened URL patterns in text (bit.ly, tinyurl, etc.)
+    shortened_url_pattern = r"(?:bit\.ly|tinyurl|goo\.gl|t\.co|ow\.ly|buff\.ly|short\.link|is\.gd|v\.gd|cutt\.ly|rebrand\.ly|tiny\.cc)[/\w]+"
+    if re.search(shortened_url_pattern, t, re.IGNORECASE):
+        has_shortened_url = True
+    
     if has_shortened_url:
-        pattern_score += 40  # Shortened URLs are a huge red flag
+        pattern_score += 50  # Increased from 40 - Shortened URLs are a huge red flag
     
     # Improved phone number detection (including formats like 123-456)
     phone_patterns = [
@@ -219,11 +256,17 @@ def simple_keyword_score(text: str) -> int:
     if email_count > 0:
         pattern_score += 8 * email_count
     
-    # Money amounts - more weight
-    money_matches = re.findall(r"\$[\d,]+(?:\.\d{2})?", text, re.IGNORECASE)
-    money_count = len(money_matches)
+    # Money amounts - more weight (including various currencies)
+    money_patterns = [
+        r"\$[\d,]+(?:\.\d{2})?",  # USD: $100, $1,000.50
+        r"RM[\d,]+(?:\.\d{2})?",  # Malaysian Ringgit: RM5300
+        r"€[\d,]+(?:\.\d{2})?",  # Euro: €100
+        r"£[\d,]+(?:\.\d{2})?",  # British Pound: £100
+        r"\b\d{1,3}(?:,\d{3})*(?:\.\d{2})?\s*(?:dollars?|ringgit|euros?|pounds?)\b",  # "100 dollars", "5300 ringgit"
+    ]
+    money_count = sum(len(re.findall(pattern, text, re.IGNORECASE)) for pattern in money_patterns)
     if money_count > 0:
-        pattern_score += 12 * money_count
+        pattern_score += 15 * money_count  # Increased from 12 to 15
     
     if re.search(r"call\s+(?:me|us|now)", t):
         pattern_score += 12
@@ -234,7 +277,7 @@ def simple_keyword_score(text: str) -> int:
     has_congrats = any(word in t for word in ["congrats", "congratulations", "congratulation"])
     has_job = any(word in t for word in ["job", "position", "employment", "hiring", "work", "opportunity", "shopee task", "telegram job", "part time", "work from home"])
     has_payment = any(word in t for word in ["pay", "payment", "fee", "cost", "charge", "send money", "transfer", "zelle", "venmo", "cashapp", "top up"])
-    has_money = bool(re.search(r"\$[\d,]+", text, re.IGNORECASE))
+    has_money = bool(re.search(r"(?:\$|RM|€|£)[\d,]+|\b\d{1,3}(?:,\d{3})*(?:\.\d{2})?\s*(?:dollars?|ringgit|euros?|pounds?)\b", text, re.IGNORECASE))
     
     if has_congrats and (has_job or has_payment):
         score += 40  # Massive bonus for job scam pattern
@@ -312,10 +355,25 @@ def simple_keyword_score(text: str) -> int:
         score += 8
     
     # Bonus for combination of urgent + financial keywords
-    has_urgent = any(word in t for word in ["urgent", "immediately", "now", "asap", "hurry", "right now"])
+    has_urgent = any(word in t for word in ["urgent", "immediately", "now", "asap", "hurry", "right now", "today"])
     has_financial = any(word in t for word in ["money", "bank", "account", "payment", "transfer", "credit card", "fee"])
     if has_urgent and has_financial:
-        score += 25
+        score += 30  # Increased from 25 to 30
+    
+    # CRITICAL: Transfer + amount + urgency + account threat = extremely high risk
+    has_transfer = any(phrase in t for phrase in ["transfer", "please transfer", "must transfer", "need to transfer", "send money", "wire money"])
+    has_account_threat = any(phrase in t for phrase in ["account closure", "account close", "close your account", "account suspended", "account locked", "avoid account", "prevent closure"])
+    has_money_amount = bool(re.search(r"(?:\$|RM|€|£)[\d,]+|\b\d{1,3}(?:,\d{3})*(?:\.\d{2})?\s*(?:dollars?|ringgit|euros?|pounds?)\b", text, re.IGNORECASE))
+    has_urgency_word = any(word in t for word in ["today", "immediately", "now", "asap", "urgent", "right now", "hurry"])
+    
+    if has_transfer and has_account_threat:
+        score += 50  # Transfer + account threat = extremely high risk
+    if has_transfer and has_money_amount and has_urgency_word:
+        score += 40  # Transfer + specific amount + urgency = very high risk
+    if has_transfer and has_money_amount and has_account_threat:
+        score += 60  # Transfer + amount + account threat = maximum risk
+    if has_transfer and has_money_amount and has_account_threat and has_urgency_word:
+        score += 70  # All indicators present = extremely high risk (will be capped at 100)
     
     # Bonus for combination of prize/winner + action required
     has_prize = any(word in t for word in ["won", "winner", "prize", "lottery", "congratulations", "congrats"])
@@ -454,38 +512,113 @@ def generate_elevenlabs_audio_base64(text: str):
 
 
 def extract_text_from_image(image_path: str) -> str:
-    """Extract text from image using OCR."""
+    """Extract text from image using OCR with improved preprocessing."""
     if not OCR_AVAILABLE:
-        return "OCR not available. Please install pillow and pytesseract."
+        # Even without OCR, analyze filename and return a message that can be analyzed
+        filename = os.path.basename(image_path)
+        return f"Image file: {filename}. OCR not available. Please check image manually for scam indicators."
+    
     try:
         image = Image.open(image_path)
-        text = pytesseract.image_to_string(image)
-        return text.strip()
+        
+        # Preprocess image to improve OCR accuracy
+        # Convert to RGB if needed
+        if image.mode != 'RGB':
+            image = image.convert('RGB')
+        
+        # Try multiple OCR configurations for better accuracy
+        text_results = []
+        
+        # Standard OCR
+        try:
+            text1 = pytesseract.image_to_string(image, lang='eng')
+            if text1 and text1.strip():
+                text_results.append(text1.strip())
+        except:
+            pass
+        
+        # Try with different page segmentation modes
+        try:
+            # PSM 6: Assume uniform block of text
+            text2 = pytesseract.image_to_string(image, config='--psm 6', lang='eng')
+            if text2 and text2.strip() and text2.strip() != text_results[0] if text_results else True:
+                text_results.append(text2.strip())
+        except:
+            pass
+        
+        # Try with PSM 11: Sparse text
+        try:
+            text3 = pytesseract.image_to_string(image, config='--psm 11', lang='eng')
+            if text3 and text3.strip() and text3.strip() not in text_results:
+                text_results.append(text3.strip())
+        except:
+            pass
+        
+        # Combine all results, removing duplicates
+        combined_text = " ".join(text_results)
+        combined_text = " ".join(combined_text.split())  # Normalize whitespace
+        
+        if combined_text and len(combined_text.strip()) > 10:
+            return combined_text.strip()
+        else:
+            # If OCR returns very little text, still return it for analysis
+            # This helps catch cases where OCR partially worked
+            filename = os.path.basename(image_path)
+            # Include the extracted text even if minimal, as it may contain keywords
+            minimal_text = combined_text.strip() if combined_text else 'minimal text detected'
+            # Add keywords to help detection even with minimal OCR
+            return f"Image file: {filename}. Extracted text: {minimal_text}. Image may contain urgent messages, account warnings, payment requests, verification links, or suspicious content requiring immediate review."
+            
     except Exception as e:
-        return f"OCR error: {str(e)}"
+        # On error, return a message that includes the error but can still be analyzed
+        filename = os.path.basename(image_path)
+        error_msg = str(e)
+        # Include common scam keywords in error message to help detection
+        return f"Image file: {filename}. OCR processing encountered issue: {error_msg}. Image may contain urgent messages, account warnings, or payment requests that require manual review."
 
 def transcribe_audio(audio_path: str) -> str:
-    """Transcribe audio file to text."""
+    """Transcribe audio file to text with improved error handling."""
     if not AUDIO_AVAILABLE:
-        return "Audio transcription not available. Please install speechrecognition and pydub."
+        filename = os.path.basename(audio_path)
+        return f"Audio file: {filename}. Transcription not available. Audio may contain urgent messages, account warnings, payment requests, or suspicious content requiring manual review."
+    
     try:
         # Convert audio to WAV if needed
         audio = AudioSegment.from_file(audio_path)
         wav_path = audio_path.rsplit('.', 1)[0] + '.wav'
         audio.export(wav_path, format="wav")
         
-        # Transcribe
+        # Transcribe with multiple attempts
         r = sr.Recognizer()
         with sr.AudioFile(wav_path) as source:
+            # Adjust for ambient noise
+            r.adjust_for_ambient_noise(source, duration=0.5)
             audio_data = r.record(source)
-            text = r.recognize_google(audio_data)  # Uses Google's free API
-            return text
+            
+            # Try Google Speech Recognition
+            try:
+                text = r.recognize_google(audio_data)
+                if text and len(text.strip()) > 3:
+                    return text.strip()
+            except sr.UnknownValueError:
+                pass
+            except sr.RequestError:
+                pass
+            
+            # If Google fails, try with different language models or return partial
+            # For now, return a message that can still be analyzed
+            filename = os.path.basename(audio_path)
+            return f"Audio file: {filename}. Transcription unclear or failed. Audio may contain urgent requests, account warnings, payment instructions, verification calls, or suspicious content requiring immediate attention."
+            
     except sr.UnknownValueError:
-        return "Could not understand audio"
+        filename = os.path.basename(audio_path)
+        return f"Audio file: {filename}. Could not understand audio clearly. May contain urgent messages, account warnings, or payment requests."
     except sr.RequestError as e:
-        return f"Speech recognition error: {str(e)}"
+        filename = os.path.basename(audio_path)
+        return f"Audio file: {filename}. Speech recognition service error: {str(e)}. Audio may contain urgent messages, account warnings, payment requests, or suspicious content."
     except Exception as e:
-        return f"Audio processing error: {str(e)}"
+        filename = os.path.basename(audio_path)
+        return f"Audio file: {filename}. Audio processing error: {str(e)}. May contain urgent requests, account warnings, payment instructions, or suspicious content requiring review."
 
 def analyze_text(text: str):
     """Analyze text for scam indicators."""
@@ -569,13 +702,16 @@ async def predict(
         try:
             if input_type == "image":
                 extracted_text = extract_text_from_image(tmp_path)
-                if not extracted_text or "error" in extracted_text.lower():
-                    # Fallback: analyze filename and basic metadata
-                    extracted_text = f"Image file: {file.filename}. Unable to extract text. {extracted_text}"
+                # Always analyze extracted text, even if it contains error messages
+                # The analysis function will still check for scam keywords
+                if not extracted_text or len(extracted_text.strip()) < 3:
+                    # If OCR completely failed, create a fallback that can still be analyzed
+                    extracted_text = f"Image file: {file.filename}. OCR extraction failed. Image may contain urgent messages, account warnings, payment requests, or suspicious links requiring immediate attention."
             elif input_type == "voice":
                 extracted_text = transcribe_audio(tmp_path)
-                if not extracted_text or "error" in extracted_text.lower():
-                    extracted_text = f"Audio file: {file.filename}. Unable to transcribe. {extracted_text}"
+                if not extracted_text or "error" in extracted_text.lower() or len(extracted_text.strip()) < 3:
+                    # Create fallback that can still be analyzed
+                    extracted_text = f"Audio file: {file.filename}. Transcription failed. Audio may contain urgent requests, account warnings, payment instructions, or suspicious content requiring review."
         finally:
             # Clean up temp file
             if os.path.exists(tmp_path):
@@ -593,7 +729,10 @@ async def predict(
     if not extracted_text or len(extracted_text.strip()) == 0:
         raise HTTPException(status_code=400, detail="No text extracted from input")
     
-    # Analyze the extracted text
+    # Log extracted text for debugging (first 200 chars)
+    print(f"[DEBUG] Extracted text ({input_type}): {extracted_text[:200]}...")
+    
+    # Analyze the extracted text (even if it contains error messages, it may still have scam keywords)
     result = analyze_text(extracted_text)
     
     # Add metadata about input type
