@@ -56,29 +56,11 @@ export async function POST(request: NextRequest) {
       });
 
       if (!backendResponse.ok) {
-        let errorMessage = `Backend error: ${backendResponse.status}`;
-        try {
-          const errorData = await backendResponse.json();
-          errorMessage = errorData.error || errorData.message || errorMessage;
-        } catch {
-          // If response is not JSON, try to get text
-          try {
-            const errorText = await backendResponse.text();
-            errorMessage = errorText || errorMessage;
-          } catch {
-            // Use default error message
-          }
-        }
-        throw new Error(errorMessage);
+        const errorText = await backendResponse.text();
+        throw new Error(`Backend error: ${backendResponse.status} ${errorText}`);
       }
 
-      let backendData;
-      try {
-        backendData = await backendResponse.json();
-      } catch (parseError) {
-        console.error("Failed to parse backend response as JSON:", parseError);
-        throw new Error("Invalid response format from backend server");
-      }
+      const backendData = await backendResponse.json();
       
       // Transform backend response to frontend format
       const isScam = backendData.risk_score >= 60 || backendData.label === "scam";
@@ -95,7 +77,7 @@ export async function POST(request: NextRequest) {
           checkedAt: new Date().toISOString(),
         },
       });
-    } catch (backendError: unknown) {
+    } catch (backendError: any) {
       console.error("Backend connection error:", backendError);
       // Fallback to local processing if backend is unavailable
       if (type === "text" && content) {
@@ -117,19 +99,10 @@ export async function POST(request: NextRequest) {
       }
       throw backendError;
     }
-  } catch (error: unknown) {
+  } catch (error: any) {
     console.error("Error processing request:", error);
-    
-    // Ensure we always return valid JSON
-    const errorMessage = (error instanceof Error ? error.message : String(error)) || "Internal server error";
-    const errorDetails = (error instanceof Error && error.stack) ? error.stack.split('\n')[0] : undefined;
-    
     return NextResponse.json(
-      { 
-        error: "Internal server error", 
-        message: errorMessage,
-        ...(errorDetails && { details: errorDetails })
-      },
+      { error: "Internal server error", message: error.message },
       { status: 500 }
     );
   }
