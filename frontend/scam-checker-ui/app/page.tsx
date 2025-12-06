@@ -2,6 +2,12 @@
 
 import { useEffect, useMemo, useState } from "react";
 
+// Helper to get current time string (client-side only)
+const getCurrentTimeString = () => {
+  if (typeof window === 'undefined') return '';
+  return new Date().toLocaleTimeString();
+};
+
 type Channel = "voice" | "text" | "image";
 type RiskLevel = "pending" | "safe" | "warn" | "danger";
 
@@ -67,9 +73,17 @@ export default function Home() {
     score: 0,
     reason: "Awaiting evidence. Paste a summary for voice, text, or image.",
     channel: "voice",
-    timestamp: new Date().toLocaleTimeString(),
+    timestamp: "",
   });
   const [history, setHistory] = useState<ScanResult[]>([]);
+
+  // Initialize timestamp on client side only
+  useEffect(() => {
+    setStatus((prev) => ({
+      ...prev,
+      timestamp: getCurrentTimeString(),
+    }));
+  }, []);
 
   const riskTitle = useMemo(() => {
     if (status.level === "pending") return "No decision yet";
@@ -112,7 +126,7 @@ export default function Home() {
         score: 0,
         reason: "Add evidence first — paste the transcript or summary.",
         channel,
-        timestamp: new Date().toLocaleTimeString(),
+        timestamp: getCurrentTimeString(),
       }));
       return;
     }
@@ -136,7 +150,7 @@ export default function Home() {
       score: 0,
       reason: "Analyzing...",
       channel,
-      timestamp: new Date().toLocaleTimeString(),
+      timestamp: getCurrentTimeString(),
     }));
 
     try {
@@ -174,7 +188,7 @@ export default function Home() {
         score: data.risk_score || 0,
         reason: data.explanation || data.recommended_action || "Analysis complete.",
         channel,
-        timestamp: new Date().toLocaleTimeString(),
+        timestamp: getCurrentTimeString(),
       };
 
       setStatus(result);
@@ -191,7 +205,7 @@ export default function Home() {
         score: 0,
         reason: error instanceof Error ? error.message : "Failed to analyze. Please try again.",
         channel,
-        timestamp: new Date().toLocaleTimeString(),
+        timestamp: getCurrentTimeString(),
       });
     } finally {
       setLoading(false);
