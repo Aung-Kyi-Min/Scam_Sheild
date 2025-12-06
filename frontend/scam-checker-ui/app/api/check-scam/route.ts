@@ -49,9 +49,19 @@ export async function POST(request: NextRequest) {
         backendFormData.append("file", file);
       }
 
+      // Get auth token from request headers or body
+      const authToken = request.headers.get("authorization")?.replace("Bearer ", "") || 
+                       formData.get("token") as string | null;
+      
       // Forward to backend
+      const headers: HeadersInit = {};
+      if (authToken) {
+        headers["Authorization"] = `Bearer ${authToken}`;
+      }
+      
       const backendResponse = await fetch(`${BACKEND_URL}/api/check`, {
         method: "POST",
+        headers,
         body: backendFormData,
       });
 
