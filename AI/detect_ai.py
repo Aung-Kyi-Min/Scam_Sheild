@@ -201,13 +201,57 @@ def simple_keyword_score(text: str) -> int:
     if size_match:
         file_size = int(size_match.group(1))
     
-    # Even if text contains error messages, analyze it for scam keywords
-    # Error messages from OCR/transcription may still contain useful information
-    t = text.lower()
+    # CRITICAL: Extract the actual transcribed/OCR text before metadata removal
+    # For successful transcriptions, format is: "transcribed_text [Audio: ...]"
+    # For error messages, format is: "Audio file: ... [File metadata: ...]"
+    # We want to analyze ONLY the actual content, not error messages
     
-    # Remove metadata from analysis to avoid false positives
-    # Remove patterns like [Audio: ...] or [File: ...] or [File metadata: ...]
-    t = re.sub(r'\[.*?\]', '', t)
+    # Check if this is an error message (multiple patterns to catch all error cases)
+    text_lower = text.lower().strip()
+    is_error_message = (
+        text.strip().startswith("Audio file:") or 
+        text.strip().startswith("Image file:") or
+        "transcription unavailable" in text_lower or
+        "transcription service unavailable" in text_lower or
+        "could not understand audio" in text_lower or
+        "transcription failed" in text_lower or
+        "speech recognition service error" in text_lower or
+        "network error connecting" in text_lower or
+        "unable to load audio" in text_lower or
+        "please review manually" in text_lower or
+        "please review audio content manually" in text_lower
+    )
+    
+    if is_error_message:
+        # For error messages, return low risk (0) since we can't analyze the actual content
+        # Error messages don't contain the actual voice/image content, so they shouldn't be scored
+        print(f"[DEBUG] Detected error message, returning 0% risk. Text preview: {text[:100]}")
+        return 0
+    
+    # Extract the actual content text (everything before the metadata brackets)
+    # Remove metadata patterns at the end: [Audio: ...] or [File: ...] or [File metadata: ...]
+    content_text = text
+    # Remove trailing metadata: [Audio: ...], [File: ...], [File metadata: ...]
+    content_text = re.sub(r'\s*\[(?:Audio|File|File metadata):[^\]]+\]\s*$', '', content_text, flags=re.IGNORECASE)
+    # Also remove standalone [File metadata: ...] patterns anywhere in the text
+    content_text = re.sub(r'\s*\[File metadata:[^\]]+\]\s*', '', content_text, flags=re.IGNORECASE)
+    # Remove any remaining metadata patterns
+    content_text = re.sub(r'\s*\[Audio:[^\]]+\]\s*', '', content_text, flags=re.IGNORECASE)
+    content_text = re.sub(r'\s*\[File:[^\]]+\]\s*', '', content_text, flags=re.IGNORECASE)
+    
+    # Clean up the content text
+    content_text = content_text.strip()
+    
+    # If after removing metadata we have no meaningful content, return 0
+    if not content_text or len(content_text) < 3:
+        print(f"[DEBUG] No meaningful content after metadata removal. Original: {text[:100]}, Content: {content_text[:100]}")
+        return 0
+    
+    # Log what we're actually analyzing (for debugging)
+    print(f"[DEBUG] Analyzing content text (length: {len(content_text)}): {content_text[:150]}...")
+    
+    # Use the extracted content for analysis
+    t = content_text.lower()
     
     # Fix common OCR errors/typos that might hide scam keywords
     ocr_fixes = {

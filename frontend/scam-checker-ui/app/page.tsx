@@ -186,11 +186,30 @@ export default function Home() {
       });
 
       if (!response.ok) {
-        const errorData = await response.json().catch(() => ({ error: "Unknown error" }));
-        throw new Error(errorData.error || `Server error: ${response.status}`);
+        let errorMessage = `Server error: ${response.status}`;
+        try {
+          const errorData = await response.json();
+          errorMessage = errorData.error || errorData.message || errorMessage;
+        } catch {
+          // If response is not JSON, try to get text
+          try {
+            const errorText = await response.text();
+            errorMessage = errorText || errorMessage;
+          } catch {
+            // Use default error message
+            errorMessage = `Server error: ${response.status} ${response.statusText}`;
+          }
+        }
+        throw new Error(errorMessage);
       }
 
-      const data = await response.json();
+      let data;
+      try {
+        data = await response.json();
+      } catch (parseError) {
+        console.error("Failed to parse response as JSON:", parseError);
+        throw new Error("Invalid response format from server. Please try again.");
+      }
 
       // Map API response to UI format (Next.js API route format)
       const details = data.details || data;
@@ -212,10 +231,21 @@ export default function Home() {
       }
     } catch (error) {
       console.error("Scan error:", error);
+      const errorMessage = error instanceof Error 
+        ? error.message 
+        : typeof error === 'string' 
+          ? error 
+          : "Failed to analyze. Please try again.";
+      
+      // Truncate very long error messages for better UX
+      const displayMessage = errorMessage.length > 200 
+        ? errorMessage.substring(0, 200) + "..." 
+        : errorMessage;
+      
       setStatus({
         level: "pending",
         score: 0,
-        reason: error instanceof Error ? error.message : "Failed to analyze. Please try again.",
+        reason: displayMessage,
         channel,
         timestamp: getCurrentTimeString(),
       });

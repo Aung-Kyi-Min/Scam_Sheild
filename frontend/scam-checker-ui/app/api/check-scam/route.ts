@@ -56,11 +56,29 @@ export async function POST(request: NextRequest) {
       });
 
       if (!backendResponse.ok) {
-        const errorText = await backendResponse.text();
-        throw new Error(`Backend error: ${backendResponse.status} ${errorText}`);
+        let errorMessage = `Backend error: ${backendResponse.status}`;
+        try {
+          const errorData = await backendResponse.json();
+          errorMessage = errorData.error || errorData.message || errorMessage;
+        } catch {
+          // If response is not JSON, try to get text
+          try {
+            const errorText = await backendResponse.text();
+            errorMessage = errorText || errorMessage;
+          } catch {
+            // Use default error message
+          }
+        }
+        throw new Error(errorMessage);
       }
 
-      const backendData = await backendResponse.json();
+      let backendData;
+      try {
+        backendData = await backendResponse.json();
+      } catch (parseError) {
+        console.error("Failed to parse backend response as JSON:", parseError);
+        throw new Error("Invalid response format from backend server");
+      }
       
       // Transform backend response to frontend format
       const isScam = backendData.risk_score >= 60 || backendData.label === "scam";
