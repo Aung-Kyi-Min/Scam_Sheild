@@ -102,7 +102,46 @@ app.post("/api/check", async (req, res, next) => {
     return next();
   });
   
-
+  app.post("/api/check", upload.single("file"), async (req, res) => {
+    let tempFilePath = req.file ? req.file.path : null;
+    
+    try {
+      const type = req.body.type || (req.body.text ? "text" : null);
+  
+      let aiResult;
+  
+      if (type === "text") {
+        aiResult = await callAIService({ type: "text", text: req.body.text });
+      } else if (type === "image" || type === "voice") {
+        aiResult = await callAIService({
+          type,
+          filePath: tempFilePath,
+          fileName: req.file.originalname,
+        });
+      }
+  
+      if (tempFilePath && fs.existsSync(tempFilePath)) {
+        fs.unlinkSync(tempFilePath);
+      }
+  
+      const audioUrl = saveAudio(aiResult);
+  
+      return res.json({
+        risk_score: aiResult.risk_score,
+        label: aiResult.label,
+        explanation: aiResult.explanation,
+        recommended_action: aiResult.recommended_action,
+        audio_url: audioUrl,
+      });
+  
+    } catch (err) {
+      if (tempFilePath && fs.existsSync(tempFilePath)) {
+        fs.unlinkSync(tempFilePath);
+      }
+      res.status(500).json({ error: err.message });
+    }
+  });
+  
 app.listen(PORT, () => {
   console.log(`Backend running on http://localhost:${PORT}`);
 });
