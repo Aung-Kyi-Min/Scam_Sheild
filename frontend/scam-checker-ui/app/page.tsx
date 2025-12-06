@@ -58,7 +58,8 @@ const riskAccent: Record<RiskLevel, string> = {
   danger: "text-rose-100",
 };
 
-const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:3001";
+// Use Next.js API route instead of direct backend call
+const API_URL = "/api/check-scam";
 
 export default function Home() {
   const [channel, setChannel] = useState<Channel>("voice");
@@ -157,19 +158,29 @@ export default function Home() {
       const formData = new FormData();
       formData.append("type", channel);
 
-      // Handle file uploads
-      if (channel === "voice" && voiceFile) {
-        formData.append("file", voiceFile);
-      } else if (channel === "image" && imageFile) {
-        formData.append("file", imageFile);
+      // Handle different input types based on channel
+      if (channel === "text") {
+        // For text channel, send content
+        if (input.trim()) {
+          formData.append("content", input.trim());
+        }
+      } else if (channel === "voice") {
+        // For voice channel, send file if available, otherwise send content as transcription
+        if (voiceFile) {
+          formData.append("file", voiceFile);
+        } else if (input.trim()) {
+          formData.append("content", input.trim());
+        }
+      } else if (channel === "image") {
+        // For image channel, send file if available, otherwise send content as description
+        if (imageFile) {
+          formData.append("file", imageFile);
+        } else if (input.trim()) {
+          formData.append("content", input.trim());
+        }
       }
 
-      // Add text input if provided
-      if (input.trim()) {
-        formData.append("text", input.trim());
-      }
-
-      const response = await fetch(`${API_URL}/api/check`, {
+      const response = await fetch(API_URL, {
         method: "POST",
         body: formData,
       });
@@ -181,12 +192,13 @@ export default function Home() {
 
       const data = await response.json();
 
-      // Map API response to UI format
-      const riskLevel = mapLabelToLevel(data.label || "benign", data.risk_score || 0);
+      // Map API response to UI format (Next.js API route format)
+      const details = data.details || data;
+      const riskLevel = mapLabelToLevel(details.label || "benign", details.risk_score || 0);
       const result: ScanResult = {
         level: riskLevel,
-        score: data.risk_score || 0,
-        reason: data.explanation || data.recommended_action || "Analysis complete.",
+        score: details.risk_score || 0,
+        reason: data.message || details.explanation || details.recommended_action || "Analysis complete.",
         channel,
         timestamp: getCurrentTimeString(),
       };
@@ -195,8 +207,8 @@ export default function Home() {
       setHistory((prev) => [result, ...prev].slice(0, 5));
 
       // If audio URL is returned, you could play it here
-      if (data.audio_url) {
-        console.log("Audio available at:", `${API_URL}${data.audio_url}`);
+      if (details.audio_url || details.audio_base64) {
+        console.log("Audio available:", details.audio_url || "base64 encoded");
       }
     } catch (error) {
       console.error("Scan error:", error);
