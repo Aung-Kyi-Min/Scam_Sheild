@@ -30,7 +30,7 @@ from dotenv import load_dotenv
 
 # Try to import optional dependencies
 try:
-    from PIL import Image
+    from PIL import Image, ImageEnhance, ImageFilter
     import pytesseract
     OCR_AVAILABLE = True
 except ImportError:
@@ -512,7 +512,7 @@ def generate_elevenlabs_audio_base64(text: str):
 
 
 def extract_text_from_image(image_path: str) -> str:
-    """Extract text from image using OCR with improved preprocessing."""
+    """Extract text from image using OCR with improved preprocessing and multiple strategies."""
     if not OCR_AVAILABLE:
         # Even without OCR, analyze filename and return a message that can be analyzed
         filename = os.path.basename(image_path)
@@ -520,61 +520,142 @@ def extract_text_from_image(image_path: str) -> str:
     
     try:
         image = Image.open(image_path)
+        original_size = image.size
         
         # Preprocess image to improve OCR accuracy
         # Convert to RGB if needed
         if image.mode != 'RGB':
             image = image.convert('RGB')
         
-        # Try multiple OCR configurations for better accuracy
+        # Try multiple preprocessing strategies
+        processed_images = []
+        
+        # Strategy 1: Original image
+        processed_images.append(("original", image))
+        
+        # Strategy 2: Grayscale with enhanced contrast
+        try:
+            gray = image.convert('L')
+            enhancer = ImageEnhance.Contrast(gray)
+            contrast_img = enhancer.enhance(2.0)  # Increase contrast
+            processed_images.append(("contrast", contrast_img))
+        except:
+            pass
+        
+        # Strategy 3: Grayscale with sharpening
+        try:
+            gray = image.convert('L')
+            sharp = gray.filter(ImageFilter.SHARPEN)
+            processed_images.append(("sharp", sharp))
+        except:
+            pass
+        
+        # Strategy 4: Resize if image is very small (OCR works better on larger images)
+        if original_size[0] < 300 or original_size[1] < 300:
+            try:
+                scale_factor = max(300 / original_size[0], 300 / original_size[1])
+                new_size = (int(original_size[0] * scale_factor), int(original_size[1] * scale_factor))
+                resized = image.resize(new_size, Image.Resampling.LANCZOS)
+                processed_images.append(("resized", resized))
+            except:
+                pass
+        
+        # Try OCR with multiple configurations
         text_results = []
+        confidence_scores = []
         
-        # Standard OCR
+        for strategy_name, processed_img in processed_images:
+            # Try multiple PSM modes for each processed image
+            psm_modes = [
+                (6, "uniform_block"),   # Assume uniform block of text
+                (11, "sparse_text"),    # Sparse text
+                (3, "auto"),            # Fully automatic page segmentation
+                (7, "single_line"),     # Treat image as single text line
+                (8, "single_word"),     # Treat image as single word
+            ]
+            
+            for psm, mode_name in psm_modes:
+                try:
+                    # Character whitelist for OCR (common characters in scam messages)
+                    char_whitelist = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789.,!?:;()[]{}\'"- /@#$%&*+=|\\'
+                    config = f'--psm {psm} -c tessedit_char_whitelist={char_whitelist}'
+                    text = pytesseract.image_to_string(processed_img, config=config, lang='eng')
+                    
+                    if text and text.strip():
+                        cleaned_text = " ".join(text.strip().split())
+                        if len(cleaned_text) > 3 and cleaned_text not in text_results:
+                            text_results.append(cleaned_text)
+                            
+                            # Try to get confidence score
+                            try:
+                                data = pytesseract.image_to_data(processed_img, config=config, lang='eng', output_type=pytesseract.Output.DICT)
+                                confidences = [int(conf) for conf in data['conf'] if int(conf) > 0]
+                                avg_confidence = sum(confidences) / len(confidences) if confidences else 0
+                                confidence_scores.append((cleaned_text, avg_confidence, strategy_name, mode_name))
+                            except:
+                                confidence_scores.append((cleaned_text, 50, strategy_name, mode_name))
+                except Exception as e:
+                    continue
+        
+        # If we got results, use the best one(s)
+        if text_results:
+            # Sort by confidence if available
+            if confidence_scores:
+                confidence_scores.sort(key=lambda x: x[1], reverse=True)
+                best_texts = [t[0] for t in confidence_scores[:3]]  # Top 3
+            else:
+                best_texts = text_results[:3]
+            
+            # Combine best results, prioritizing longer texts
+            combined = " ".join(best_texts)
+            combined = " ".join(combined.split())  # Normalize whitespace
+            
+            # Remove duplicate sentences
+            sentences = combined.split('.')
+            unique_sentences = []
+            seen = set()
+            for sent in sentences:
+                sent_clean = sent.strip().lower()
+                if sent_clean and sent_clean not in seen and len(sent_clean) > 5:
+                    unique_sentences.append(sent.strip())
+                    seen.add(sent_clean)
+            
+            final_text = ". ".join(unique_sentences)
+            
+            if final_text and len(final_text.strip()) > 5:
+                print(f"[OCR] Successfully extracted {len(final_text)} characters from image")
+                return final_text.strip()
+        
+        # If OCR returned very little or nothing, try one more time with aggressive settings
         try:
-            text1 = pytesseract.image_to_string(image, lang='eng')
-            if text1 and text1.strip():
-                text_results.append(text1.strip())
+            gray = image.convert('L')
+            # Very aggressive preprocessing
+            enhancer = ImageEnhance.Contrast(gray)
+            high_contrast = enhancer.enhance(3.0)
+            enhancer2 = ImageEnhance.Sharpness(high_contrast)
+            sharp_contrast = enhancer2.enhance(2.0)
+            
+            # Try with most permissive settings
+            text = pytesseract.image_to_string(sharp_contrast, config='--psm 6 -c tessedit_pageseg_mode=6', lang='eng')
+            if text and text.strip() and len(text.strip()) > 5:
+                cleaned = " ".join(text.strip().split())
+                print(f"[OCR] Extracted {len(cleaned)} characters with aggressive preprocessing")
+                return cleaned
         except:
             pass
         
-        # Try with different page segmentation modes
-        try:
-            # PSM 6: Assume uniform block of text
-            text2 = pytesseract.image_to_string(image, config='--psm 6', lang='eng')
-            if text2 and text2.strip() and text2.strip() != text_results[0] if text_results else True:
-                text_results.append(text2.strip())
-        except:
-            pass
-        
-        # Try with PSM 11: Sparse text
-        try:
-            text3 = pytesseract.image_to_string(image, config='--psm 11', lang='eng')
-            if text3 and text3.strip() and text3.strip() not in text_results:
-                text_results.append(text3.strip())
-        except:
-            pass
-        
-        # Combine all results, removing duplicates
-        combined_text = " ".join(text_results)
-        combined_text = " ".join(combined_text.split())  # Normalize whitespace
-        
-        if combined_text and len(combined_text.strip()) > 10:
-            return combined_text.strip()
-        else:
-            # If OCR returns very little text, still return it for analysis
-            # This helps catch cases where OCR partially worked
-            filename = os.path.basename(image_path)
-            # Include the extracted text even if minimal, as it may contain keywords
-            minimal_text = combined_text.strip() if combined_text else 'minimal text detected'
-            # Add keywords to help detection even with minimal OCR
-            return f"Image file: {filename}. Extracted text: {minimal_text}. Image may contain urgent messages, account warnings, payment requests, verification links, or suspicious content requiring immediate review."
+        # If we still got nothing meaningful, return minimal text but don't add generic fallback
+        # This ensures different images get different scores
+        filename = os.path.basename(image_path)
+        return f"Image: {filename}. OCR extracted minimal text. Manual review recommended."
             
     except Exception as e:
-        # On error, return a message that includes the error but can still be analyzed
+        # On error, return minimal info - don't add generic scam keywords
+        # This ensures different images get different scores based on filename
         filename = os.path.basename(image_path)
         error_msg = str(e)
-        # Include common scam keywords in error message to help detection
-        return f"Image file: {filename}. OCR processing encountered issue: {error_msg}. Image may contain urgent messages, account warnings, or payment requests that require manual review."
+        print(f"[OCR] Error processing image {filename}: {error_msg}")
+        return f"Image: {filename}. OCR error: {error_msg[:50]}"
 
 def transcribe_audio(audio_path: str) -> str:
     """Transcribe audio file to text with improved error handling."""
@@ -702,16 +783,22 @@ async def predict(
         try:
             if input_type == "image":
                 extracted_text = extract_text_from_image(tmp_path)
-                # Always analyze extracted text, even if it contains error messages
-                # The analysis function will still check for scam keywords
-                if not extracted_text or len(extracted_text.strip()) < 3:
-                    # If OCR completely failed, create a fallback that can still be analyzed
-                    extracted_text = f"Image file: {file.filename}. OCR extraction failed. Image may contain urgent messages, account warnings, payment requests, or suspicious links requiring immediate attention."
+                # Only use fallback if OCR completely failed (very short or just error message)
+                # Don't add generic scam keywords - let the actual extracted text be analyzed
+                if not extracted_text or len(extracted_text.strip()) < 5:
+                    # Minimal fallback - no generic keywords to ensure different images score differently
+                    extracted_text = f"Image file: {file.filename}. OCR extraction returned minimal text."
+                # If extracted text is mostly error message, try to extract just the filename part
+                elif "OCR" in extracted_text and "error" in extracted_text.lower() and len(extracted_text) < 100:
+                    # Very minimal - just filename to ensure uniqueness
+                    extracted_text = f"Image: {file.filename}"
             elif input_type == "voice":
                 extracted_text = transcribe_audio(tmp_path)
-                if not extracted_text or "error" in extracted_text.lower() or len(extracted_text.strip()) < 3:
-                    # Create fallback that can still be analyzed
-                    extracted_text = f"Audio file: {file.filename}. Transcription failed. Audio may contain urgent requests, account warnings, payment instructions, or suspicious content requiring review."
+                if not extracted_text or len(extracted_text.strip()) < 5:
+                    # Minimal fallback - no generic keywords
+                    extracted_text = f"Audio file: {file.filename}. Transcription returned minimal text."
+                elif "error" in extracted_text.lower() and "transcription" in extracted_text.lower() and len(extracted_text) < 100:
+                    extracted_text = f"Audio: {file.filename}"
         finally:
             # Clean up temp file
             if os.path.exists(tmp_path):
@@ -731,9 +818,22 @@ async def predict(
     
     # Log extracted text for debugging (first 200 chars)
     print(f"[DEBUG] Extracted text ({input_type}): {extracted_text[:200]}...")
+    print(f"[DEBUG] Extracted text length: {len(extracted_text)} characters")
     
-    # Analyze the extracted text (even if it contains error messages, it may still have scam keywords)
-    result = analyze_text(extracted_text)
+    # Analyze the extracted text
+    # If it's just a minimal fallback (filename only), give it a low base score
+    # Otherwise, analyze the actual content
+    if input_type in ["image", "voice"] and len(extracted_text.strip()) < 50 and ("Image:" in extracted_text or "Audio:" in extracted_text):
+        # Very minimal extraction - can't analyze content, return low risk with note
+        result = {
+            "risk_score": 20,  # Low risk since we can't analyze content
+            "label": "benign",
+            "explanation": f"⚠️ Unable to extract sufficient text from {input_type}. Risk score is low because content could not be analyzed. Manual review recommended.",
+            "recommended_action": "Please review this content manually as automated analysis could not extract sufficient text."
+        }
+    else:
+        # Analyze the actual extracted text
+        result = analyze_text(extracted_text)
     
     # Add metadata about input type
     result["input_type"] = input_type
