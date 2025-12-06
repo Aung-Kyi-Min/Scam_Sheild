@@ -1,6 +1,9 @@
 const express = require("express");
 const cors = require("cors");
 const path = require("path");
+const fetch = require("node-fetch");
+const FormData = require("form-data");
+const fs = require("fs");
 
 const app = express();
 app.use(cors());
@@ -24,6 +27,40 @@ const upload = multer({
 const tempDir = path.join(__dirname, "temp");
 if (!fs.existsSync(tempDir)) {
   fs.mkdirSync(tempDir, { recursive: true });
+}
+
+
+
+
+const PY_AI_URL = process.env.PY_AI_URL || "http://127.0.0.1:9001";
+
+async function callAIService(data, options = {}) {
+  const formData = new FormData();
+
+  if (data.type === "text") {
+    formData.append("text", data.text);
+    formData.append("type", "text");
+  } else {
+    const fileStream = fs.createReadStream(data.filePath);
+    formData.append("file", fileStream, data.fileName || "file");
+    formData.append("type", data.type);
+  }
+
+  if (Object.keys(options).length > 0) {
+    formData.append("options", JSON.stringify(options));
+  }
+
+  const resp = await fetch(`${PY_AI_URL}/predict`, {
+    method: "POST",
+    body: formData,
+    headers: formData.getHeaders(),
+  });
+
+  if (!resp.ok) {
+    throw new Error(`AI service error: ${resp.status} ${await resp.text()}`);
+  }
+
+  return resp.json();
 }
 
 
