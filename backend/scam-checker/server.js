@@ -6,11 +6,203 @@ const path = require("path");
 const multer = require("multer");
 const FormData = require("form-data");
 const { v4: uuidv4 } = require("uuid");
+const crypto = require("crypto");
 
 const app = express();
 app.use(cors());
 app.use(express.json());
 app.use("/audio", express.static(path.join(__dirname, "audio")));
+
+// Simple in-memory user storage (in production, use a database)
+const USERS_FILE = path.join(__dirname, "users.json");
+const SESSIONS_FILE = path.join(__dirname, "sessions.json");
+
+// Load users from file
+function loadUsers() {
+  if (fs.existsSync(USERS_FILE)) {
+    try {
+      return JSON.parse(fs.readFileSync(USERS_FILE, "utf8"));
+    } catch (e) {
+      return {};
+    }
+  }
+  return {};
+}
+
+// Save users to file
+function saveUsers(users) {
+  fs.writeFileSync(USERS_FILE, JSON.stringify(users, null, 2));
+}
+
+// Load sessions from file
+function loadSessions() {
+  if (fs.existsSync(SESSIONS_FILE)) {
+    try {
+      return JSON.parse(fs.readFileSync(SESSIONS_FILE, "utf8"));
+    } catch (e) {
+      return {};
+    }
+  }
+  return {};
+}
+
+// Save sessions to file
+function saveSessions(sessions) {
+  fs.writeFileSync(SESSIONS_FILE, JSON.stringify(sessions, null, 2));
+}
+
+// Simple password hashing (in production, use bcrypt)
+function hashPassword(password) {
+  return crypto.createHash("sha256").update(password).digest("hex");
+}
+
+// Generate session token
+function generateToken() {
+  return crypto.randomBytes(32).toString("hex");
+}
+
+// Middleware to check authentication
+function requireAuth(req, res, next) {
+  const token = req.headers.authorization?.replace("Bearer ", "") || req.body.token || req.query.token;
+  
+  if (!token) {
+    return res.status(401).json({ error: "Authentication required" });
+  }
+  
+  const sessions = loadSessions();
+  const session = sessions[token];
+  
+  if (!session || session.expires < Date.now()) {
+    // Clean up expired session
+    if (sessions[token]) {
+      delete sessions[token];
+      saveSessions(sessions);
+    }
+    return res.status(401).json({ error: "Invalid or expired token" });
+  }
+  
+  req.user = session.user;
+  next();
+}
+
+// Auth endpoints
+app.post("/api/auth/signup", async (req, res) => {
+  try {
+    const { email, password, name } = req.body;
+    
+    if (!email || !password) {
+      return res.status(400).json({ error: "Email and password are required" });
+    }
+    
+    const users = loadUsers();
+    
+    if (users[email]) {
+      return res.status(400).json({ error: "User already exists" });
+    }
+    
+    // Create user
+    users[email] = {
+      email,
+      password: hashPassword(password),
+      name: name || email,
+      createdAt: new Date().toISOString(),
+    };
+    
+    saveUsers(users);
+    
+    // Don't create session - user needs to log in manually after signup
+    res.json({
+      success: true,
+      message: "Account created successfully. Please log in.",
+    });
+  } catch (err) {
+    console.error("Signup error:", err);
+    res.status(500).json({ error: "Internal server error" });
+  }
+});
+
+app.post("/api/auth/login", async (req, res) => {
+  try {
+    const { email, password } = req.body;
+    
+    if (!email || !password) {
+      return res.status(400).json({ error: "Email and password are required" });
+    }
+    
+    const users = loadUsers();
+    const user = users[email];
+    
+    if (!user || user.password !== hashPassword(password)) {
+      return res.status(401).json({ error: "Invalid email or password" });
+    }
+    
+    // Create session
+    const token = generateToken();
+    const sessions = loadSessions();
+    sessions[token] = {
+      user: { email, name: user.name },
+      expires: Date.now() + 30 * 24 * 60 * 60 * 1000, // 30 days
+    };
+    saveSessions(sessions);
+    
+    res.json({
+      success: true,
+      token,
+      user: { email, name: user.name },
+    });
+  } catch (err) {
+    console.error("Login error:", err);
+    res.status(500).json({ error: "Internal server error" });
+  }
+});
+
+app.post("/api/auth/logout", (req, res) => {
+  try {
+    const token = req.headers.authorization?.replace("Bearer ", "") || req.body.token;
+    
+    if (token) {
+      const sessions = loadSessions();
+      if (sessions[token]) {
+        delete sessions[token];
+        saveSessions(sessions);
+      }
+    }
+    
+    res.json({ success: true });
+  } catch (err) {
+    console.error("Logout error:", err);
+    res.status(500).json({ error: "Internal server error" });
+  }
+});
+
+app.get("/api/auth/check", (req, res) => {
+  try {
+    const token = req.headers.authorization?.replace("Bearer ", "") || req.query.token;
+    
+    if (!token) {
+      return res.json({ authenticated: false });
+    }
+    
+    const sessions = loadSessions();
+    const session = sessions[token];
+    
+    if (!session || session.expires < Date.now()) {
+      if (sessions[token]) {
+        delete sessions[token];
+        saveSessions(sessions);
+      }
+      return res.json({ authenticated: false });
+    }
+    
+    res.json({
+      authenticated: true,
+      user: session.user,
+    });
+  } catch (err) {
+    console.error("Auth check error:", err);
+    res.json({ authenticated: false });
+  }
+});
 
 const PY_AI_URL = process.env.PY_AI_URL || "http://127.0.0.1:9001"; // Python AI service
 
@@ -129,6 +321,29 @@ app.post("/api/check", upload.single("file"), async (req, res) => {
         }
         aiResult = await callAIService({ type: "text", text });
       } else if (type === "image" || type === "voice") {
+        // Require authentication for image and voice checking
+        const token = req.headers.authorization?.replace("Bearer ", "") || req.body.token;
+        if (!token) {
+          return res.status(401).json({ 
+            error: "Authentication required for image and voice checking. Please sign up or log in.",
+            requiresAuth: true 
+          });
+        }
+        
+        const sessions = loadSessions();
+        const session = sessions[token];
+        
+        if (!session || session.expires < Date.now()) {
+          if (sessions[token]) {
+            delete sessions[token];
+            saveSessions(sessions);
+          }
+          return res.status(401).json({ 
+            error: "Invalid or expired token. Please log in again.",
+            requiresAuth: true 
+          });
+        }
+        
         if (!req.file) {
           return res.status(400).json({ error: `${type} file is required` });
         }

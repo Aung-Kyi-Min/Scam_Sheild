@@ -39,3 +39,7 @@ dist/
 build/
 *.egg-info/
 
+# User data and sessions (backend)
+backend/scam-checker/users.json
+backend/scam-checker/sessions.json
+

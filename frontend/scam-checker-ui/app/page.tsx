@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
+import AuthModal from "../components/AuthModal";
 
 // Helper to get current time string (client-side only)
 const getCurrentTimeString = () => {
@@ -77,6 +78,13 @@ export default function Home() {
     timestamp: "",
   });
   const [history, setHistory] = useState<ScanResult[]>([]);
+  
+  // Authentication state
+  const [isAuthenticated, setIsAuthenticated] = useState(false);
+  const [authToken, setAuthToken] = useState<string | null>(null);
+  const [user, setUser] = useState<{ email: string; name: string } | null>(null);
+  const [showAuthModal, setShowAuthModal] = useState(false);
+  const [checkingAuth, setCheckingAuth] = useState(true);
 
   // Initialize timestamp on client side only
   useEffect(() => {
@@ -85,6 +93,75 @@ export default function Home() {
       timestamp: getCurrentTimeString(),
     }));
   }, []);
+
+  // Check authentication status on mount
+  useEffect(() => {
+    const checkAuth = async () => {
+      const token = localStorage.getItem("authToken");
+      const storedUser = localStorage.getItem("user");
+      
+      if (token && storedUser) {
+        try {
+          const response = await fetch(`/api/auth?action=check&token=${token}`);
+          
+          const contentType = response.headers.get("content-type");
+          if (!contentType || !contentType.includes("application/json")) {
+            // Backend returned HTML or other non-JSON, likely an error
+            console.error("Auth check: Non-JSON response received");
+            localStorage.removeItem("authToken");
+            localStorage.removeItem("user");
+            return;
+          }
+          
+          const data = await response.json();
+          
+          if (data.authenticated) {
+            setIsAuthenticated(true);
+            setAuthToken(token);
+            setUser(data.user || JSON.parse(storedUser));
+          } else {
+            // Token invalid, clear storage
+            localStorage.removeItem("authToken");
+            localStorage.removeItem("user");
+          }
+        } catch (err) {
+          console.error("Auth check failed:", err);
+          localStorage.removeItem("authToken");
+          localStorage.removeItem("user");
+        }
+      }
+      setCheckingAuth(false);
+    };
+    
+    checkAuth();
+  }, []);
+
+  const handleAuthSuccess = (token: string, userData: { email: string; name: string }) => {
+    setAuthToken(token);
+    setUser(userData);
+    setIsAuthenticated(true);
+    setShowAuthModal(false);
+  };
+
+  const handleLogout = async () => {
+    try {
+      if (authToken) {
+        await fetch("/api/auth", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ action: "logout", token: authToken }),
+        });
+      }
+    } catch (err) {
+      console.error("Logout error:", err);
+    }
+    
+    localStorage.removeItem("authToken");
+    localStorage.removeItem("user");
+    setAuthToken(null);
+    setUser(null);
+    setIsAuthenticated(false);
+  };
 
   const riskTitle = useMemo(() => {
     if (status.level === "pending") return "No decision yet";
@@ -119,6 +196,20 @@ export default function Home() {
   };
 
   const runScan = async () => {
+    // Check authentication for image/voice
+    if ((channel === "voice" || channel === "image") && !isAuthenticated) {
+      setShowAuthModal(true);
+      setStatus((prev) => ({
+        ...prev,
+        level: "pending",
+        score: 0,
+        reason: "Please sign up or log in to use image and voice checking.",
+        channel,
+        timestamp: getCurrentTimeString(),
+      }));
+      return;
+    }
+
     // Validate input
     if (channel === "text" && !input.trim()) {
       setStatus((prev) => ({
@@ -180,8 +271,19 @@ export default function Home() {
         }
       }
 
+      // Add auth token to form data if available
+      if (authToken) {
+        formData.append("token", authToken);
+      }
+
+      const headers: HeadersInit = {};
+      if (authToken) {
+        headers["Authorization"] = `Bearer ${authToken}`;
+      }
+
       const response = await fetch(API_URL, {
         method: "POST",
+        headers,
         body: formData,
       });
 
@@ -237,6 +339,28 @@ export default function Home() {
           ? error 
           : "Failed to analyze. Please try again.";
       
+      // Handle auth errors - show login modal if auth required
+      if (errorMessage.includes("Authentication required") || 
+          errorMessage.includes("requiresAuth") ||
+          errorMessage.includes("Invalid or expired token")) {
+        setShowAuthModal(true);
+        setIsAuthenticated(false);
+        setAuthToken(null);
+        setUser(null);
+        localStorage.removeItem("authToken");
+        localStorage.removeItem("user");
+        setStatus((prev) => ({
+          ...prev,
+          level: "pending",
+          score: 0,
+          reason: "Please sign up or log in to use image and voice checking.",
+          channel,
+          timestamp: getCurrentTimeString(),
+        }));
+        setLoading(false);
+        return;
+      }
+      
       // Truncate very long error messages for better UX
       const displayMessage = errorMessage.length > 200 
         ? errorMessage.substring(0, 200) + "..." 
@@ -259,16 +383,40 @@ export default function Home() {
     <div className="min-h-screen bg-[#0c1018] text-slate-100">
       <div className="mx-auto flex max-w-4xl flex-col gap-8 px-6 py-12">
         <header className="space-y-4 text-center">
-          <div className="inline-flex items-center gap-2 rounded-full border border-white/10 bg-white/5 px-3 py-1 text-[11px] font-medium text-slate-200">
-            <span className="h-2 w-2 rounded-full bg-emerald-400" />
-            Scam Shield · Voice · Text · Image
+          <div className="flex items-center justify-between">
+            <div className="inline-flex items-center gap-2 rounded-full border border-white/10 bg-white/5 px-3 py-1 text-[11px] font-medium text-slate-200">
+              <span className="h-2 w-2 rounded-full bg-emerald-400" />
+              Scam Shield · Voice · Text · Image
+            </div>
+            <div className="flex items-center gap-3">
+              {isAuthenticated && user ? (
+                <>
+                  <span className="text-sm text-slate-300">
+                    {user.name || user.email}
+                  </span>
+                  <button
+                    onClick={handleLogout}
+                    className="rounded-lg border border-white/10 bg-white/5 px-3 py-1.5 text-xs font-medium text-slate-300 transition hover:bg-white/10 hover:text-slate-100"
+                  >
+                    Logout
+                  </button>
+                </>
+              ) : (
+                <button
+                  onClick={() => setShowAuthModal(true)}
+                  className="rounded-lg bg-emerald-500/20 border border-emerald-500/50 px-3 py-1.5 text-xs font-medium text-emerald-300 transition hover:bg-emerald-500/30"
+                >
+                  Sign Up / Log In
+                </button>
+              )}
+            </div>
           </div>
           <div className="space-y-2">
             <h1 className="text-3xl font-semibold md:text-4xl">
               What do you want to validate?
             </h1>
             <p className="text-sm text-slate-400 md:text-base">
-              Paste notes, text, or image description. Pick a mode and get an instant read on safety.
+              Text checking is free! Sign up to unlock image and voice file checking.
             </p>
           </div>
           <div className="flex justify-center">
@@ -277,13 +425,16 @@ export default function Home() {
                 <button
                   key={c}
                   onClick={() => setChannel(c)}
-                  className={`rounded-full px-4 py-2 text-sm font-medium transition ${
+                  className={`rounded-full px-4 py-2 text-sm font-medium transition relative ${
                     channel === c
                       ? "bg-emerald-500 text-white shadow-lg shadow-emerald-500/30"
                       : "text-slate-200 hover:bg-white/5"
                   }`}
                 >
                   {channelCopy[c].label}
+                  {(c === "voice" || c === "image") && !isAuthenticated && (
+                    <span className="ml-1.5 text-[10px]">🔒</span>
+                  )}
                 </button>
               ))}
             </div>
@@ -302,50 +453,88 @@ export default function Home() {
                 </div>
               </div>
               {channel === "voice" && (
-                <label className="mt-3 flex flex-col gap-2 rounded-xl border border-dashed border-emerald-400/60 bg-[#0f141f] px-4 py-4 text-sm text-slate-200 transition hover:border-emerald-300 hover:bg-white/5">
-                  <input
-                    type="file"
-                    accept=".mp3,.wav,audio/*"
-                    className="hidden"
-                    onChange={(e) => {
-                      const file = e.target.files?.[0];
-                      if (file) {
-                        setVoiceFile(file);
-                        setVoiceFileName(file.name);
-                      }
-                    }}
-                  />
-                  <span className="text-slate-200">Upload or drop a .mp3 / .wav</span>
-                  <span className="text-xs text-slate-400">
-                    Max a few MB. Optional: paste a short summary below.
-                  </span>
-                  {voiceFileName && (
-                    <span className="text-xs text-emerald-200">Selected: {voiceFileName}</span>
+                <>
+                  {!isAuthenticated && (
+                    <div className="mt-3 rounded-xl border border-amber-500/30 bg-amber-500/10 p-4 text-sm text-amber-200">
+                      <p className="font-semibold">🔒 Authentication Required</p>
+                      <p className="mt-1 text-xs text-amber-300/80">
+                        Voice file checking requires a free account. Click "Sign Up / Log In" above to get started.
+                      </p>
+                    </div>
                   )}
-                </label>
+                  <label className={`mt-3 flex flex-col gap-2 rounded-xl border border-dashed px-4 py-4 text-sm text-slate-200 transition ${
+                    isAuthenticated 
+                      ? "border-emerald-400/60 bg-[#0f141f] hover:border-emerald-300 hover:bg-white/5" 
+                      : "border-slate-600/40 bg-[#0a0d12] opacity-60 cursor-not-allowed"
+                  }`}>
+                    <input
+                      type="file"
+                      accept=".mp3,.wav,audio/*"
+                      className="hidden"
+                      disabled={!isAuthenticated}
+                      onChange={(e) => {
+                        const file = e.target.files?.[0];
+                        if (file) {
+                          setVoiceFile(file);
+                          setVoiceFileName(file.name);
+                        }
+                      }}
+                    />
+                    <span className="text-slate-200">
+                      {isAuthenticated ? "Upload or drop a .mp3 / .wav" : "🔒 Sign in to upload voice files"}
+                    </span>
+                    <span className="text-xs text-slate-400">
+                      {isAuthenticated 
+                        ? "Max a few MB. Optional: paste a short summary below."
+                        : "Text checking is free. Sign up to unlock voice and image checking."}
+                    </span>
+                    {voiceFileName && (
+                      <span className="text-xs text-emerald-200">Selected: {voiceFileName}</span>
+                    )}
+                  </label>
+                </>
               )}
               {channel === "image" && (
-                <label className="mt-3 flex flex-col gap-2 rounded-xl border border-dashed border-cyan-400/60 bg-[#0f141f] px-4 py-4 text-sm text-slate-200 transition hover:border-cyan-300 hover:bg-white/5">
-                  <input
-                    type="file"
-                    accept="image/png,image/jpeg"
-                    className="hidden"
-                    onChange={(e) => {
-                      const file = e.target.files?.[0];
-                      if (file) {
-                        setImageFile(file);
-                        setImageFileName(file.name);
-                      }
-                    }}
-                  />
-                  <span className="text-slate-200">Drag in or upload a PNG / JPEG</span>
-                  <span className="text-xs text-slate-400">
-                    Optional: add a short description below.
-                  </span>
-                  {imageFileName && (
-                    <span className="text-xs text-cyan-200">Selected: {imageFileName}</span>
+                <>
+                  {!isAuthenticated && (
+                    <div className="mt-3 rounded-xl border border-amber-500/30 bg-amber-500/10 p-4 text-sm text-amber-200">
+                      <p className="font-semibold">🔒 Authentication Required</p>
+                      <p className="mt-1 text-xs text-amber-300/80">
+                        Image file checking requires a free account. Click "Sign Up / Log In" above to get started.
+                      </p>
+                    </div>
                   )}
-                </label>
+                  <label className={`mt-3 flex flex-col gap-2 rounded-xl border border-dashed px-4 py-4 text-sm text-slate-200 transition ${
+                    isAuthenticated 
+                      ? "border-cyan-400/60 bg-[#0f141f] hover:border-cyan-300 hover:bg-white/5" 
+                      : "border-slate-600/40 bg-[#0a0d12] opacity-60 cursor-not-allowed"
+                  }`}>
+                    <input
+                      type="file"
+                      accept="image/png,image/jpeg"
+                      className="hidden"
+                      disabled={!isAuthenticated}
+                      onChange={(e) => {
+                        const file = e.target.files?.[0];
+                        if (file) {
+                          setImageFile(file);
+                          setImageFileName(file.name);
+                        }
+                      }}
+                    />
+                    <span className="text-slate-200">
+                      {isAuthenticated ? "Drag in or upload a PNG / JPEG" : "🔒 Sign in to upload images"}
+                    </span>
+                    <span className="text-xs text-slate-400">
+                      {isAuthenticated 
+                        ? "Optional: add a short description below."
+                        : "Text checking is free. Sign up to unlock voice and image checking."}
+                    </span>
+                    {imageFileName && (
+                      <span className="text-xs text-cyan-200">Selected: {imageFileName}</span>
+                    )}
+                  </label>
+                </>
               )}
               <textarea
                 value={input}
@@ -465,6 +654,12 @@ export default function Home() {
           </div>
         </section>
       </div>
+      
+      <AuthModal
+        isOpen={showAuthModal}
+        onClose={() => setShowAuthModal(false)}
+        onSuccess={handleAuthSuccess}
+      />
     </div>
   );
 }
