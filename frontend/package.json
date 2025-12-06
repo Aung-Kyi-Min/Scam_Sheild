@@ -1,0 +1,23 @@
+{
+  "name": "frontend",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "dev": "cd scam-checker-ui && npm run dev",
+    "build": "cd scam-checker-ui && npm run build",
+    "start": "cd scam-checker-ui && npm start",
+    "lint": "cd scam-checker-ui && npm run lint",
+    "install": "cd scam-checker-ui && npm install"
+  },
+  "devDependencies": {
+    "@tailwindcss/postcss": "^4",
+    "@types/node": "^20",
+    "@types/react": "^19",
+    "@types/react-dom": "^19",
+    "eslint": "^9",
+    "eslint-config-next": "16.0.7",
+    "tailwindcss": "^4",
+    "typescript": "^5"
+  }
+}
+
