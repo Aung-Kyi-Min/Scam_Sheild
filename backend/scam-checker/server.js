@@ -48,11 +48,27 @@ async function callAIService(data, options = {}) {
     formData.append("options", JSON.stringify(options));
   }
 
-  const resp = await axios.post(`${PY_AI_URL}/predict`, formData, {
-    headers: formData.getHeaders(),
-  });
-  
-  return resp.data;
+  try {
+    const resp = await axios.post(`${PY_AI_URL}/predict`, formData, {
+      headers: formData.getHeaders(),
+      timeout: 120000, // 2 minute timeout for audio processing
+    });
+    
+    return resp.data;
+  } catch (axiosError) {
+    // Handle axios errors with better messages
+    if (axiosError.code === 'ECONNREFUSED') {
+      throw new Error(`Cannot connect to AI service at ${PY_AI_URL}. Make sure the Python AI service is running.`);
+    } else if (axiosError.code === 'ETIMEDOUT') {
+      throw new Error('AI service request timed out. The audio file may be too large or the service is overloaded.');
+    } else if (axiosError.response) {
+      // Server responded with error status
+      const errorMsg = axiosError.response.data?.detail || axiosError.response.data?.error || axiosError.response.statusText;
+      throw new Error(`AI service error: ${errorMsg}`);
+    } else {
+      throw new Error(`AI service error: ${axiosError.message || 'Unknown error'}`);
+    }
+  }
 }
 
 // Handle both JSON and multipart form data
@@ -163,7 +179,13 @@ app.post("/api/check", upload.single("file"), async (req, res) => {
     }
   } catch (err) {
     console.error("Error /api/check:", err);
-    res.status(500).json({ error: err.message || "Internal error" });
+    const errorMessage = err instanceof Error ? err.message : String(err) || "Internal error";
+    res.status(500).json({ 
+      error: errorMessage,
+      message: errorMessage,
+      risk_score: 0,
+      label: "error"
+    });
   }
 });
 

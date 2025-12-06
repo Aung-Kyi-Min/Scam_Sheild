@@ -25,7 +25,20 @@ The `start.sh` script automatically kills any existing process on port 9001 befo
 cd "simple-scam-checker copy/backend/ai-testing"
 ```
 
-### 2. Install dependencies (first time only)
+### 2. Install system dependencies (first time only)
+
+**Install ffmpeg (required for audio processing):**
+```bash
+# On macOS (using Homebrew):
+brew install ffmpeg
+
+# On Ubuntu/Debian:
+sudo apt-get update && sudo apt-get install -y ffmpeg
+
+# On other systems, see: https://ffmpeg.org/download.html
+```
+
+**Install Python dependencies:**
 ```bash
 pip install -r requirements.txt
 ```
