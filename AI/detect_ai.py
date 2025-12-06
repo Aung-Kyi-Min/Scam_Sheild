@@ -1,0 +1,436 @@
+"""
+Python AI microservice (FastAPI).
+- POST /predict  accepts:
+  - JSON { "text": "...", "options": {...} } for text input
+  - multipart/form-data with "file" and "type" (image/voice) for file uploads
+- Returns JSON with risk_score, label, explanation, recommended_action
+- Optionally generates base64-encoded MP3 via ElevenLabs
+
+Before running, set environment variables:
+- ANTHROPIC_API_KEY  (for Claude)
+- ELEVENLABS_API_KEY (optional, for voice)
+
+Install dependencies:
+- pip install pillow pytesseract speechrecognition pydub
+- For OCR: Install Tesseract OCR system package
+- For audio: May need ffmpeg for audio conversion
+"""
+
+import os
+import base64
+import json
+import uuid
+import tempfile
+from fastapi import FastAPI, HTTPException, File, UploadFile, Form
+from fastapi.responses import JSONResponse
+from pydantic import BaseModel
+from typing import Optional
+from dotenv import load_dotenv
+from AI.utils_processing import analyze_text, extract_text_from_image, transcribe_audio
+
+# Try to import optional dependencies
+try:
+    from PIL import Image
+    import pytesseract
+    OCR_AVAILABLE = True
+except ImportError:
+    OCR_AVAILABLE = False
+    print("Warning: OCR libraries not available. Install: pip install pillow pytesseract")
+
+try:
+    import speech_recognition as sr
+    from pydub import AudioSegment
+    AUDIO_AVAILABLE = True
+except ImportError:
+    AUDIO_AVAILABLE = False
+    print("Warning: Audio transcription libraries not available. Install: pip install speechrecognition pydub")
+
+load_dotenv()
+
+ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY")
+ELEVENLABS_API_KEY = os.getenv("ELEVENLABS_API_KEY")
+
+app = FastAPI()
+
+class PredictRequest(BaseModel):
+    text: str
+    options: dict = {}
+
+# ----- Utilities: improved rule-based fallback -----
+# High-risk keywords (worth more points)
+HIGH_RISK_KEYWORDS = [
+    # Basic urgency and verification
+    "urgent", "verify", "password", "otp", "one-time", "verify now",
+    "account locked", "suspended", "closed", "expired", "compromised",
+    "lottery", "prize", "winner", "congratulations", "congrats", "won", "claim now",
+    "free money", "guaranteed", "risk-free", "act now", "limited time",
+    "click here", "click link", "verify account", "update password",
+    "wire transfer", "send money", "bitcoin", "crypto", "investment opportunity",
+    
+    # Banking / Financial Scam Keywords
+    "bank alert", "account suspended", "account locked", "verify your account",
+    "unauthorized transaction", "security update", "click link to verify",
+    "reset your banking", "maybank2u verify", "cimb alert", "rhb suspended",
+    "bank negara", "tac code", "otp code", "urgent banking", "bank security team",
+    
+    # Delivery / Parcel Scam (DHL, J&T, PosLaju)
+    "parcel pending", "delivery failed", "customs fee", "package detained",
+    "pay delivery fee", "tracking issue", "update shipping info", "reschedule parcel",
+    "courier notice", "dhl notice", "j&t delivery", "poslaju pending",
+    
+    # Loan / Fast Cash Scam
+    "instant loan", "fast cash", "personal loan approval", "no documents needed",
+    "guaranteed loan", "low interest loan", "approved immediately", "register loan",
+    "contact agent", "financial assistance", "urgent cash", "apply now loan",
+    
+    # Investment Scam / Crypto Scam
+    "high return investment", "guaranteed profit", "double your money", "crypto trading",
+    "forex signals", "vip group", "investment platform", "copy trade",
+    "withdrawal blocked", "top up required", "profit guarantee", "insider trading",
+    "binary option", "bitcoin mining",
+    
+    # Job Scam (Part-time job, Shopee task)
+    "job offer", "job position", "employment opportunity", "hiring", "work from home",
+    "remote job", "get paid", "earn money", "make money", "quick cash",
+    "high paying job", "work from home job", "simple task income", "shopee task",
+    "like share earn", "daily commission", "salary instantly", "part time job offer",
+    "task rebate", "top up task", "job recruitment agent", "telegram job",
+    
+    # Payment request keywords
+    "processing fee", "application fee", "registration fee", "activation fee",
+    "processing cost", "admin fee", "service fee", "setup fee",
+    "pay now", "send payment", "make payment", "wire money", "transfer money",
+    
+    # Payment methods (often used in scams)
+    "zelle", "venmo", "cashapp", "cash app", "paypal", "western union",
+    "moneygram", "gift card", "itunes card", "amazon card", "google play card",
+    "paynow agent", "escrow service",
+    
+    # Urgency and pressure tactics
+    "immediately", "asap", "right now", "today only", "expires today",
+    "last chance", "final notice", "don't miss out", "limited offer",
+    "urgent action required", "do not tell anyone", "keep this confidential",
+    "act immediately", "within 10 minutes", "last warning", "final reminder",
+    "failure to comply",
+    
+    # Authority impersonation (very high risk)
+    "this is the police", "this is police", "fbi", "irs", "government",
+    "law enforcement", "federal agent", "sheriff", "marshal",
+    "court order", "warrant", "arrest warrant", "legal action",
+    "freeze your account", "freeze account", "account freeze",
+    "suspend your account", "close your account", "seize your account",
+    "give us your", "provide your", "send us your", "we need your",
+    "police investigation", "immigration office", "your identity used",
+    "tax evasion", "customs department", "legal case", "bank account frozen",
+    "pay fine", "verify identity", "officer in charge", "macc investigation",
+    
+    # Romance / Love Scams
+    "my love", "sweetheart", "i need help", "send me money", "emergency situation",
+    "i will visit you soon", "trust me baby", "money for ticket",
+    "gift stuck in customs", "i need urgent assistance", "investment opportunity for us",
+    
+    # Fake Sales / Marketplace Scam
+    "reserved for you", "deposit first", "booking fee", "limited stock",
+    "seller unavailable", "courier will contact you", "shipping arranged",
+    "payment verification", "refund not possible",
+    
+    # Tech Support Scam
+    "your device infected", "security breach", "tech support team", "verify apple id",
+    "google account warning", "update antivirus", "download support app",
+    "remote access required", "login from unknown device",
+    
+    # High-Risk Phrases
+    "click the link", "verify now", "free gift for you", "you are selected",
+    "lucky draw winner", "claim your prize", "activation required", "top up to continue"
+]
+
+# Medium-risk keywords
+MEDIUM_RISK_KEYWORDS = [
+    "bank", "account", "login", "transfer", "payment", "invoice",
+    "parcel", "package", "delivery", "shipping", "refund",
+    "tax", "government", "legal action", "lawsuit",
+    "social security", "ssn", "credit card", "card number",
+    "job", "position", "employment", "hire", "salary", "wage",
+    "fee", "cost", "charge", "deposit", "prepayment",
+    "police", "officer", "agent", "authority", "freeze", "seize",
+    "loan", "cash", "investment", "trading", "profit", "return",
+    "courier", "tracking", "customs", "detained", "pending",
+    "support", "device", "security", "update", "verify", "confirm"
+]
+
+# Suspicious patterns
+SUSPICIOUS_PATTERNS = [
+    r"http[s]?://[^\s]+",  # URLs
+    r"\b\d{3}[-.]?\d{3}[-.]?\d{4}\b",  # Phone numbers
+    r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b",  # Email addresses
+    r"\$\d+",  # Money amounts
+    r"call\s+(?:me|us|now)",  # Urgent call requests
+]
+
+# Shortened URL domains (major red flag)
+SHORTENED_URL_DOMAINS = [
+    "bit.ly", "tinyurl.com", "goo.gl", "t.co", "ow.ly", "buff.ly",
+    "short.link", "is.gd", "v.gd", "cutt.ly", "rebrand.ly", "tiny.cc"
+]
+
+import re
+
+def simple_keyword_score(text: str) -> int:
+    """
+    Calculate scam risk score based on keywords and patterns.
+    Returns a score from 0-100.
+    """
+    if not text or len(text.strip()) == 0:
+        return 0
+    
+    t = text.lower()
+    score = 0
+    
+    # Check high-risk keywords (10 points each, max 70)
+    high_risk_hits = sum(1 for k in HIGH_RISK_KEYWORDS if k in t)
+    score += min(70, high_risk_hits * 10)
+    
+    # Check medium-risk keywords (3 points each, max 25)
+    medium_risk_hits = sum(1 for k in MEDIUM_RISK_KEYWORDS if k in t)
+    score += min(25, medium_risk_hits * 3)
+    
+    # Check suspicious patterns (more weight)
+    pattern_score = 0
+    url_count = len(re.findall(r"http[s]?://[^\s]+", text, re.IGNORECASE))
+    if url_count > 0:
+        pattern_score += 20 * url_count  # URLs are very suspicious
+    
+    # CRITICAL: Shortened URLs are extremely suspicious (major red flag)
+    has_shortened_url = any(domain in t for domain in SHORTENED_URL_DOMAINS)
+    if has_shortened_url:
+        pattern_score += 40  # Shortened URLs are a huge red flag
+    
+    # Improved phone number detection (including formats like 123-456)
+    phone_patterns = [
+        r"\b\d{3}[-.]?\d{3}[-.]?\d{4}\b",  # Standard format
+        r"\b\d{3}[-.]?\d{3}\b",  # Short format like 123-456
+        r"\b\d{10,}\b"  # Long number sequences
+    ]
+    phone_count = sum(len(re.findall(pattern, text, re.IGNORECASE)) for pattern in phone_patterns)
+    if phone_count > 0:
+        pattern_score += 15 * phone_count
+    
+    email_count = len(re.findall(r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b", text, re.IGNORECASE))
+    if email_count > 0:
+        pattern_score += 8 * email_count
+    
+    # Money amounts - more weight
+    money_matches = re.findall(r"\$[\d,]+(?:\.\d{2})?", text, re.IGNORECASE)
+    money_count = len(money_matches)
+    if money_count > 0:
+        pattern_score += 12 * money_count
+    
+    if re.search(r"call\s+(?:me|us|now)", t):
+        pattern_score += 12
+    
+    score += min(35, pattern_score)  # Max 35 points for patterns
+    
+    # CRITICAL: Job scam detection (congrats/congratulations + payment + job = very high risk)
+    has_congrats = any(word in t for word in ["congrats", "congratulations", "congratulation"])
+    has_job = any(word in t for word in ["job", "position", "employment", "hiring", "work", "opportunity", "shopee task", "telegram job", "part time", "work from home"])
+    has_payment = any(word in t for word in ["pay", "payment", "fee", "cost", "charge", "send money", "transfer", "zelle", "venmo", "cashapp", "top up"])
+    has_money = bool(re.search(r"\$[\d,]+", text, re.IGNORECASE))
+    
+    if has_congrats and (has_job or has_payment):
+        score += 40  # Massive bonus for job scam pattern
+    if has_job and has_payment and has_money:
+        score += 35  # Job + payment request + money amount = scam
+    
+    # Banking scam detection
+    has_bank_alert = any(phrase in t for phrase in ["bank alert", "account suspended", "account locked", "verify your account", "unauthorized transaction"])
+    has_bank_security = any(phrase in t for phrase in ["security update", "bank security team", "reset your banking", "tac code", "otp code"])
+    if has_bank_alert or has_bank_security:
+        score += 30  # Banking scam indicators
+    
+    # Delivery/Parcel scam detection
+    has_parcel = any(phrase in t for phrase in ["parcel pending", "delivery failed", "package detained", "customs fee", "pay delivery fee"])
+    has_courier = any(phrase in t for phrase in ["dhl notice", "j&t delivery", "poslaju pending", "courier notice", "tracking issue"])
+    if has_parcel or has_courier:
+        score += 25  # Delivery scam indicators
+    if has_parcel and has_payment:
+        score += 35  # Parcel + payment request = scam
+    
+    # Loan scam detection
+    has_loan = any(phrase in t for phrase in ["instant loan", "fast cash", "personal loan approval", "no documents needed", "guaranteed loan", "approved immediately"])
+    if has_loan:
+        score += 30  # Loan scam indicators
+    if has_loan and has_payment:
+        score += 40  # Loan + payment = scam
+    
+    # Investment/Crypto scam detection
+    has_investment = any(phrase in t for phrase in ["high return investment", "guaranteed profit", "double your money", "crypto trading", "forex signals", "profit guarantee"])
+    has_crypto = any(phrase in t for phrase in ["bitcoin mining", "binary option", "withdrawal blocked", "top up required", "copy trade", "vip group"])
+    if has_investment or has_crypto:
+        score += 30  # Investment scam indicators
+    if has_investment and has_payment:
+        score += 40  # Investment + payment = scam
+    
+    # Romance scam detection
+    has_romance = any(phrase in t for phrase in ["my love", "sweetheart", "trust me baby", "i will visit you soon"])
+    has_romance_help = any(phrase in t for phrase in ["i need help", "send me money", "emergency situation", "money for ticket", "gift stuck in customs"])
+    if has_romance and has_romance_help:
+        score += 45  # Romance + money request = scam
+    
+    # Marketplace scam detection
+    has_marketplace = any(phrase in t for phrase in ["reserved for you", "deposit first", "booking fee", "limited stock", "seller unavailable", "refund not possible"])
+    if has_marketplace:
+        score += 25  # Marketplace scam indicators
+    if has_marketplace and has_payment:
+        score += 35  # Marketplace + payment = scam
+    
+    # Tech support scam detection
+    has_tech = any(phrase in t for phrase in ["your device infected", "security breach", "tech support team", "verify apple id", "google account warning", "remote access required"])
+    if has_tech:
+        score += 30  # Tech support scam indicators
+    
+    # Payment method + money amount = high risk
+    payment_methods = ["zelle", "venmo", "cashapp", "cash app", "paypal", "western union", "moneygram", "gift card"]
+    has_payment_method = any(method in t for method in payment_methods)
+    if has_payment_method and has_money:
+        score += 30
+    
+    # Processing/application fee + payment method = very suspicious
+    has_fee = any(phrase in t for phrase in ["processing fee", "application fee", "registration fee", "activation fee", "setup fee"])
+    if has_fee and (has_payment_method or has_money):
+        score += 35
+    
+    # Bonus for multiple high-risk indicators (exponential)
+    if high_risk_hits >= 5:
+        score += 30
+    elif high_risk_hits >= 4:
+        score += 25
+    elif high_risk_hits >= 3:
+        score += 20
+    elif high_risk_hits >= 2:
+        score += 15
+    elif high_risk_hits >= 1:
+        score += 8
+    
+    # Bonus for combination of urgent + financial keywords
+    has_urgent = any(word in t for word in ["urgent", "immediately", "now", "asap", "hurry", "right now"])
+    has_financial = any(word in t for word in ["money", "bank", "account", "payment", "transfer", "credit card", "fee"])
+    if has_urgent and has_financial:
+        score += 25
+    
+    # Bonus for combination of prize/winner + action required
+    has_prize = any(word in t for word in ["won", "winner", "prize", "lottery", "congratulations", "congrats"])
+    has_action = any(word in t for word in ["click", "verify", "claim", "call", "respond", "pay", "send"])
+    if has_prize and has_action:
+        score += 30
+    
+    # Bonus for "confirm" + payment/job = scam pattern
+    if "confirm" in t and (has_payment or has_job):
+        score += 20
+    
+    # CRITICAL: Authority impersonation scams (police, FBI, IRS, etc. + financial request = very high risk)
+    has_authority = any(phrase in t for phrase in [
+        "this is the police", "this is police", "fbi", "irs", "government",
+        "law enforcement", "federal agent", "sheriff", "marshal", "court order",
+        "warrant", "arrest warrant", "police investigation", "immigration office",
+        "your identity used", "tax evasion", "customs department", "legal case",
+        "officer in charge", "macc investigation"
+    ])
+    has_freeze = any(phrase in t for phrase in ["freeze", "freeze your account", "freeze account", "suspend", "close your account", "seize", "bank account frozen"])
+    has_card_request = any(phrase in t for phrase in ["card number", "credit card", "give us your", "provide your", "send us your", "we need your", "pay fine", "verify identity"])
+    has_financial_info = any(word in t for word in ["account", "bank", "ssn", "social security"])
+    
+    if has_authority and (has_freeze or has_card_request or has_financial_info):
+        score += 50  # Authority + financial request = extremely high risk
+    
+    if has_freeze and has_financial_info:
+        score += 35  # Account freeze + financial info request
+    
+    # Social engineering / Urgent pressure tactics
+    has_urgent_pressure = any(phrase in t for phrase in [
+        "urgent action required", "do not tell anyone", "keep this confidential",
+        "act immediately", "within 10 minutes", "last warning", "final reminder",
+        "failure to comply"
+    ])
+    if has_urgent_pressure:
+        score += 25  # Urgent pressure tactics
+    if has_urgent_pressure and has_payment:
+        score += 35  # Urgent pressure + payment = scam
+    
+    # CRITICAL: Invoice + shortened URL = very suspicious
+    has_invoice = "invoice" in t
+    if has_invoice and has_shortened_url:
+        score += 45  # Invoice with shortened URL is a major scam indicator
+    
+    # Shortened URL + any action word = high risk
+    if has_shortened_url and has_action:
+        score += 30
+    
+    # "Open this" or "click here" + shortened URL = very suspicious
+    has_open = any(phrase in t for phrase in ["open this", "open", "click here", "click this", "see your"])
+    if has_open and has_shortened_url:
+        score += 40
+    
+    # Cap at 100
+    return min(100, score)
+
+@app.post("/predict")
+async def predict(
+    text: Optional[str] = Form(None),
+    type: Optional[str] = Form(None),
+    file: Optional[UploadFile] = File(None),
+    options: Optional[str] = Form(None)
+):
+    """
+    Handle both JSON and multipart form data requests.
+    - For text: send "text" in form data or JSON
+    - For images/voice: send "file" and "type" in multipart form
+    """
+    extracted_text = ""
+    input_type = type or "text"
+    
+    # Handle file uploads
+    if file and input_type in ["image", "voice"]:
+        # Save uploaded file temporarily
+        with tempfile.NamedTemporaryFile(delete=False, suffix=os.path.splitext(file.filename)[1]) as tmp_file:
+            content = await file.read()
+            tmp_file.write(content)
+            tmp_path = tmp_file.name
+        
+        try:
+            if input_type == "image":
+                extracted_text = extract_text_from_image(tmp_path)
+                if not extracted_text or "error" in extracted_text.lower():
+                    # Fallback: analyze filename and basic metadata
+                    extracted_text = f"Image file: {file.filename}. Unable to extract text. {extracted_text}"
+            elif input_type == "voice":
+                extracted_text = transcribe_audio(tmp_path)
+                if not extracted_text or "error" in extracted_text.lower():
+                    extracted_text = f"Audio file: {file.filename}. Unable to transcribe. {extracted_text}"
+        finally:
+            # Clean up temp file
+            if os.path.exists(tmp_path):
+                os.unlink(tmp_path)
+    elif text:
+        extracted_text = text.strip()
+    else:
+        # Try to parse as JSON (for backward compatibility)
+        try:
+            # This handles JSON requests
+            raise HTTPException(status_code=400, detail="Either 'text' or 'file' with 'type' is required")
+        except:
+            raise HTTPException(status_code=400, detail="Either 'text' or 'file' with 'type' is required")
+    
+    if not extracted_text or len(extracted_text.strip()) == 0:
+        raise HTTPException(status_code=400, detail="No text extracted from input")
+    
+    # Analyze the extracted text
+    result = analyze_text(extracted_text)
+    
+    # Add metadata about input type
+    result["input_type"] = input_type
+    if input_type in ["image", "voice"]:
+        result["extracted_text"] = extracted_text[:200]  # Include first 200 chars
+    
+    return result
+
+# Run: uvicorn ai:app --host 127.0.0.1 --port 9000
