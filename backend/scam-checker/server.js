@@ -1,5 +1,5 @@
 const express = require("express");
-const fetch = require("node-fetch");
+const axios = require("axios");
 const cors = require("cors");
 const fs = require("fs");
 const path = require("path");
@@ -48,17 +48,11 @@ async function callAIService(data, options = {}) {
     formData.append("options", JSON.stringify(options));
   }
 
-  const resp = await fetch(`${PY_AI_URL}/predict`, {
-    method: "POST",
-    body: formData,
+  const resp = await axios.post(`${PY_AI_URL}/predict`, formData, {
     headers: formData.getHeaders(),
   });
   
-  if (!resp.ok) {
-    const txt = await resp.text();
-    throw new Error(`AI service error: ${resp.status} ${txt}`);
-  }
-  return resp.json();
+  return resp.data;
 }
 
 // Handle both JSON and multipart form data
