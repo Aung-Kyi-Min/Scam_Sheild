@@ -68,7 +68,8 @@ export default function Home() {
     score: 0,
     reason: "Awaiting evidence. Paste a summary for voice, text, or image.",
     channel: "voice",
-    timestamp: new Date().toLocaleTimeString(),
+    // Leave empty on first render so SSR and client markup match; fill in on interactions
+    timestamp: "",
   });
   const [history, setHistory] = useState<ScanResult[]>([]);
 
