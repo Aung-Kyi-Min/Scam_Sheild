@@ -63,6 +63,22 @@ async function callAIService(data, options = {}) {
   return resp.json();
 }
 
+const { v4: uuidv4 } = require("uuid");
+const audioDir = path.join(__dirname, "audio");
+
+function saveAudio(aiResult) {
+  if (!aiResult.audio_base64) return null;
+
+  if (!fs.existsSync(audioDir)) {
+    fs.mkdirSync(audioDir, { recursive: true });
+  }
+
+  const id = uuidv4();
+  const filePath = path.join(audioDir, `${id}.mp3`);
+  fs.writeFileSync(filePath, Buffer.from(aiResult.audio_base64, "base64"));
+  return `/audio/${id}.mp3`;
+}
+
 
 app.listen(PORT, () => {
   console.log(`Backend running on http://localhost:${PORT}`);
