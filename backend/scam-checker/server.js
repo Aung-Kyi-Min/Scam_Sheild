@@ -79,6 +79,29 @@ function saveAudio(aiResult) {
   return `/audio/${id}.mp3`;
 }
 
+app.post("/api/check", async (req, res, next) => {
+    const contentType = req.headers["content-type"] || "";
+  
+    if (contentType.includes("application/json") && req.body.text && !req.body.type) {
+      try {
+        const aiResult = await callAIService({ type: "text", text: req.body.text });
+        const audioUrl = saveAudio(aiResult);
+  
+        return res.json({
+          risk_score: aiResult.risk_score,
+          label: aiResult.label,
+          explanation: aiResult.explanation,
+          recommended_action: aiResult.recommended_action,
+          audio_url: audioUrl,
+        });
+      } catch (err) {
+        return next(err);
+      }
+    }
+  
+    return next();
+  });
+  
 
 app.listen(PORT, () => {
   console.log(`Backend running on http://localhost:${PORT}`);
