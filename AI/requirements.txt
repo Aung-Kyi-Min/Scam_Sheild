@@ -1,0 +1,10 @@
+fastapi==0.95.2
+uvicorn[standard]==0.22.0
+requests==2.31.0
+python-dotenv==1.0.0
+pydantic==1.10.10
+pillow>=10.0.0
+pytesseract>=0.3.10
+speechrecognition>=3.10.0
+pydub>=0.25.1
+python-multipart>=0.0.6
