@@ -25,8 +25,8 @@ from fastapi import FastAPI, HTTPException, File, UploadFile, Form
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 from typing import Optional
+import requests
 from dotenv import load_dotenv
-from AI.utils_processing import analyze_text, extract_text_from_image, transcribe_audio
 
 # Try to import optional dependencies
 try:
@@ -372,6 +372,176 @@ def simple_keyword_score(text: str) -> int:
     
     # Cap at 100
     return min(100, score)
+
+# ----- Claude Integration Helper (example) -----
+def call_claude_classify(text: str):
+    """
+    Example call to Anthropic/Claude. This is a template — adapt to the
+    Anthropic client library or HTTP endpoint you use.
+    """
+    if not ANTHROPIC_API_KEY:
+        raise RuntimeError("ANTHROPIC_API_KEY not set")
+
+    prompt = f"""
+You are a security assistant that classifies messages as 'scam' or 'benign'.
+Return a JSON object only with keys: risk_score (0-100 int), label (scam|suspicious|benign),
+explanation (a short plain-English explanation), recommended_action (short).
+Message:
+---BEGIN---
+{text}
+---END---
+"""
+    url = "https://api.anthropic.com/v1/complete"
+    headers = {
+        "Authorization": f"Bearer {ANTHROPIC_API_KEY}",
+        "Content-Type": "application/json"
+    }
+    payload = {
+        "model": "claude-2.1",   # replace with the model you're using
+        "prompt": prompt,
+        "max_tokens": 400,
+        "temperature": 0.0
+    }
+    resp = requests.post(url, headers=headers, json=payload, timeout=30)
+    if resp.status_code != 200:
+        raise RuntimeError(f"Anthropic API error {resp.status_code}: {resp.text}")
+
+    # The response format may differ by API version. Try to parse JSON-ish text from resp.
+    try:
+        data = resp.json()
+        # Some Anthropic endpoints return text in data["completion"]
+        # Fallback: read textual completion
+        text_out = data.get("completion") or data.get("completion", "")
+        if not text_out:
+            # try reading top-level content
+            text_out = data.get("result") or data.get("text") or resp.text
+    except Exception:
+        text_out = resp.text
+
+    # Expecting assistant to return a JSON string; try to extract JSON
+    try:
+        parsed = json.loads(text_out.strip())
+        return parsed
+    except Exception:
+        # As fallback, do naive mapping
+        return {
+            "risk_score": simple_keyword_score(text),
+            "label": "suspicious" if simple_keyword_score(text) > 40 else "benign",
+            "explanation": "Couldn't parse Claude output; returned fallback based on keywords.",
+            "recommended_action": "Inspect message; don't reply or click links."
+        }
+
+# ----- ElevenLabs voice generation helper -----
+def generate_elevenlabs_audio_base64(text: str):
+    if not ELEVENLABS_API_KEY:
+        return None
+    # This is a sample using ElevenLabs TTS endpoint pattern - adapt to latest API docs
+    url = "https://api.elevenlabs.io/v1/text-to-speech/YOUR_VOICE_ID"
+    headers = {
+        "xi-api-key": ELEVENLABS_API_KEY,
+        "Content-Type": "application/json"
+    }
+    payload = {
+        "text": text,
+        "voice_settings": {"stability": 0.6, "similarity_boost": 0.7}
+    }
+    resp = requests.post(url, headers=headers, json=payload, timeout=30)
+    if resp.status_code != 200:
+        print("ElevenLabs TTS error:", resp.status_code, resp.text)
+        return None
+    audio_bytes = resp.content
+    return base64.b64encode(audio_bytes).decode("utf-8")
+
+
+def extract_text_from_image(image_path: str) -> str:
+    """Extract text from image using OCR."""
+    if not OCR_AVAILABLE:
+        return "OCR not available. Please install pillow and pytesseract."
+    try:
+        image = Image.open(image_path)
+        text = pytesseract.image_to_string(image)
+        return text.strip()
+    except Exception as e:
+        return f"OCR error: {str(e)}"
+
+def transcribe_audio(audio_path: str) -> str:
+    """Transcribe audio file to text."""
+    if not AUDIO_AVAILABLE:
+        return "Audio transcription not available. Please install speechrecognition and pydub."
+    try:
+        # Convert audio to WAV if needed
+        audio = AudioSegment.from_file(audio_path)
+        wav_path = audio_path.rsplit('.', 1)[0] + '.wav'
+        audio.export(wav_path, format="wav")
+        
+        # Transcribe
+        r = sr.Recognizer()
+        with sr.AudioFile(wav_path) as source:
+            audio_data = r.record(source)
+            text = r.recognize_google(audio_data)  # Uses Google's free API
+            return text
+    except sr.UnknownValueError:
+        return "Could not understand audio"
+    except sr.RequestError as e:
+        return f"Speech recognition error: {str(e)}"
+    except Exception as e:
+        return f"Audio processing error: {str(e)}"
+
+def analyze_text(text: str):
+    """Analyze text for scam indicators."""
+    if len(text) == 0:
+        raise HTTPException(status_code=400, detail="text empty")
+
+    # 1) Try to call Claude, fall back to improved keyword detection
+    try:
+        claude_out = call_claude_classify(text)
+        # Expect keys risk_score,label,explanation,recommended_action
+        risk = int(claude_out.get("risk_score", simple_keyword_score(text)))
+        label = claude_out.get("label", "suspicious")
+        explanation = claude_out.get("explanation", "")
+        recommended_action = claude_out.get("recommended_action", "")
+    except Exception as e:
+        # fallback - use improved keyword detection
+        error_str = str(e)
+        risk = simple_keyword_score(text)
+        
+        # Determine label based on risk score
+        if risk >= 70:
+            label = "scam"
+        elif risk >= 40:
+            label = "suspicious"
+        else:
+            label = "benign"
+        
+        # Generate dynamic explanation based on risk
+        if risk >= 70:
+            explanation = f"⚠️ HIGH RISK ({risk}%): Multiple scam indicators detected including urgent language, suspicious links, or financial requests. This appears to be a scam."
+            recommended_action = "DO NOT respond, click links, or provide any information. Delete this message and block the sender."
+        elif risk >= 40:
+            explanation = f"⚠️ MODERATE RISK ({risk}%): Some suspicious elements detected. Exercise caution with this message."
+            recommended_action = "Verify the sender through a known, trusted channel before taking any action. Do not click links or provide personal information."
+        elif risk >= 20:
+            explanation = f"⚠️ LOW RISK ({risk}%): Minor suspicious elements detected. Proceed with caution."
+            recommended_action = "Verify the sender's identity before responding or clicking any links."
+        else:
+            explanation = f"✅ LOW RISK ({risk}%): No significant scam indicators detected. This message appears safe."
+            recommended_action = "This message appears legitimate, but always verify independently when in doubt."
+
+    result = {
+        "risk_score": risk,
+        "label": label,
+        "explanation": explanation,
+        "recommended_action": recommended_action
+    }
+
+    # Optionally produce voice warning for high risks
+    if risk >= 60:
+        voice_text = f"Warning. This message appears to be a scam. Risk score {risk} percent. {explanation}"
+        audio_b64 = generate_elevenlabs_audio_base64(voice_text)
+        if audio_b64:
+            result["audio_base64"] = audio_b64
+
+    return result
 
 @app.post("/predict")
 async def predict(
